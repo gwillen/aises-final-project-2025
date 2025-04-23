@@ -18,6 +18,9 @@ import shutil
 from typing import Dict, List, Any, Tuple, Optional
 import re
 
+# Global configuration
+debug_mode = False  # Will be set by command line argument
+
 def ensure_temp_directory() -> str:
     """Create and return a temporary directory for code execution."""
     temp_dir = os.path.join(tempfile.gettempdir(), "code_examples_runner")
@@ -46,15 +49,21 @@ def run_javascript_code(code: str, temp_dir: str) -> Tuple[bool, str, str]:
     if not shutil.which("node"):
         return False, "", "Node.js is not installed or not in PATH"
 
+    # Fix invalid function names (e.g., 'function')
+    fixed_code = re.sub(r'function\s+function\s*\(', 'function validFunc(', code)
+
+    # Handle edge cases where 'function' is used as variable name
+    fixed_code = re.sub(r'(let|var|const)\s+function\s*=', r'\1 validFunc =', fixed_code)
+
     # Wrap the code in a function and add a call to it
-    wrapped_code = code
+    wrapped_code = fixed_code
 
     # Check if it already has a function wrapper
     if not re.search(r"function\s+\w+\s*\(\s*\)", wrapped_code):
         # If no function defined, wrap it
         wrapped_code = f"""
 function main() {{
-{code}
+{fixed_code}
 }}
 console.log(main());
 """
@@ -73,8 +82,8 @@ console.log(main());
         # Run the JavaScript code with Node.js
         process = subprocess.run(
             ["node", file_path],
-            capture_output=True,
-            text=True,
+                               capture_output=True,
+                               text=True,
             timeout=5  # 5 second timeout
         )
         return process.returncode == 0, process.stdout.strip(), process.stderr.strip()
@@ -150,9 +159,81 @@ def run_c_code(code: str, temp_dir: str) -> Tuple[bool, str, str]:
     if not shutil.which("gcc"):
         return False, "", "GCC is not installed or not in PATH"
 
+    # Wrap the code with a main function if it doesn't have one
+    if "main(" not in code:
+        try:
+            # Try to extract the function name and return type from the code
+            # This regex matches common C function declarations like "int function()" or "double calc_result(void)"
+            func_match = re.search(r'(int|float|double|long|char\s*\*|void|unsigned\s+\w+|\w+)\s+(\w+)\s*\([^)]*\)\s*{', code)
+
+            if func_match:
+                return_type = func_match.group(1)
+                function_name = func_match.group(2)
+
+                if 'debug_mode' in globals() and debug_mode:
+                    print(f"[DEBUG] Found function: {function_name} with return type: {return_type}")
+            else:
+                # Fallback to a simpler regex if the complex one fails
+                simple_match = re.search(r'(\w+)\s*\(\s*\)', code)
+                function_name = simple_match.group(1) if simple_match else "function"
+                return_type = "int"  # Default to int if we can't determine
+
+                if 'debug_mode' in globals() and debug_mode:
+                    print(f"[DEBUG] Using fallback detection. Function: {function_name} with default return type: {return_type}")
+
+            # Add stdio.h include and main function that calls the example function
+            # Use appropriate printf format based on return type
+            if "int" in return_type or "long" in return_type or "unsigned" in return_type:
+                printf_format = "%d"
+            elif "float" in return_type or "double" in return_type:
+                printf_format = "%f"
+            elif "char" in return_type and "*" in return_type:
+                printf_format = "%s"
+            else:
+                printf_format = "%d"  # Default to int format
+
+            wrapped_code = f"""
+#include <stdio.h>
+
+{code}
+
+int main() {{
+    {return_type} result = {function_name}();
+    printf("{printf_format}\\n", result);
+    return 0;
+}}
+"""
+        except Exception as e:
+            # If anything goes wrong with the regex, use a default wrapper
+            wrapped_code = f"""
+#include <stdio.h>
+
+{code}
+
+int main() {{
+    // Default wrapper when function detection fails
+    int result = function();
+    printf("%d\\n", result);
+    return 0;
+}}
+"""
+            if 'debug_mode' in globals() and debug_mode:
+                print(f"[DEBUG] Error in function detection: {str(e)}")
+                print("[DEBUG] Using default function wrapper")
+    else:
+        wrapped_code = code
+        if 'debug_mode' in globals() and debug_mode:
+            print("[DEBUG] Code already contains a main function")
+
     # Write code to a temporary file
-    file_path = write_temp_file(temp_dir, "example.c", code)
+    file_path = write_temp_file(temp_dir, "example.c", wrapped_code)
     executable_path = os.path.join(temp_dir, "example")
+
+    if 'debug_mode' in globals() and debug_mode:
+        print("[DEBUG] Generated C code:")
+        print("-" * 40)
+        print(wrapped_code)
+        print("-" * 40)
 
     try:
         # Compile the C code
@@ -164,6 +245,8 @@ def run_c_code(code: str, temp_dir: str) -> Tuple[bool, str, str]:
         )
 
         if compile_process.returncode != 0:
+            if 'debug_mode' in globals() and debug_mode:
+                print(f"[DEBUG] Compilation failed with error:\n{compile_process.stderr}")
             return False, "", f"Compilation error: {compile_process.stderr}"
 
         # Run the compiled executable
@@ -174,10 +257,19 @@ def run_c_code(code: str, temp_dir: str) -> Tuple[bool, str, str]:
             timeout=5  # 5 second timeout for execution
         )
 
+        if 'debug_mode' in globals() and debug_mode:
+            print(f"[DEBUG] Execution result: {run_process.stdout.strip()}")
+            if run_process.stderr:
+                print(f"[DEBUG] Execution stderr: {run_process.stderr}")
+
         return run_process.returncode == 0, run_process.stdout.strip(), run_process.stderr.strip()
     except subprocess.TimeoutExpired:
+        if 'debug_mode' in globals() and debug_mode:
+            print("[DEBUG] Execution timed out")
         return False, "", "Execution timed out"
     except Exception as e:
+        if 'debug_mode' in globals() and debug_mode:
+            print(f"[DEBUG] Exception during execution: {str(e)}")
         return False, "", str(e)
 
 def run_code(code: str, language: str) -> Tuple[bool, str, str]:
@@ -329,6 +421,8 @@ def main():
                         help='Filter examples by language (e.g., Python, C, Javascript)')
     parser.add_argument('--verbose', action='store_true',
                         help='Show detailed output for each example')
+    parser.add_argument('--debug', action='store_true',
+                        help='Show additional debug information for code execution')
 
     args = parser.parse_args()
 
@@ -348,13 +442,29 @@ def main():
 
     print(f"Verifying {len(examples)} examples...")
 
+    # Create debug logger if requested
+    global debug_mode
+    debug_mode = args.debug
+
     # Verify each example
     verified_examples = []
     for i, example in enumerate(examples, 1):
         language = example.get("language", "Unknown")
         difficulty = example.get("difficulty", "?")
+        code = example.get("code", "")
 
         print(f"[{i}/{len(examples)}] Verifying {language} example (difficulty {difficulty})...", end="")
+
+        # Display code in verbose mode
+        if args.verbose:
+            print("\n")
+            print("="*40)
+            print(f"CODE ({language}):")
+            print("-"*40)
+            print(code)
+            print("="*40)
+            print("Executing...", end="")
+
         verified = verify_example(example)
         verified_examples.append(verified)
 
