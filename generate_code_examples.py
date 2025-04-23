@@ -94,23 +94,12 @@ def list_anthropic_models(client: Anthropic) -> None:
         client: Anthropic client
     """
     try:
-        # Anthropic API doesn't have a direct list models endpoint
-        # Instead, we'll list the currently known Claude models
-        claude_models = [
-            "claude-3-opus-20240229",
-            "claude-3-sonnet-20240229",
-            "claude-3-haiku-20240307",
-            "claude-2.1",
-            "claude-2.0",
-            "claude-instant-1.2"
-        ]
+        print("Fetching available Anthropic models...")
+        models = client.models.list()
 
         print("\nAvailable Anthropic Claude models:")
-        for model in claude_models:
-            print(f"  - {model}")
-
-        print("\nNote: This is a static list of known models. Anthropic may have added new models.")
-        print("Check Anthropic documentation for the most up-to-date list.")
+        for model in sorted(models.data, key=lambda x: x.created_at):
+            print(f"  - {model.id} ({model.display_name})")
 
         print("\nTo use a model, run the script with:")
         print(f"  python generate_code_examples.py --provider anthropic --model MODEL_NAME")
