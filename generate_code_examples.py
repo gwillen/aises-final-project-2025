@@ -291,6 +291,8 @@ def main():
                         help='Custom prompt to use (defaults to the predefined prompt)')
     parser.add_argument('--list-models', action='store_true',
                         help='List available models from the specified provider and exit')
+    parser.add_argument('--dry-run', action='store_true',
+                        help='Show what would be sent to the API without actually making the call')
 
     args = parser.parse_args()
 
@@ -326,6 +328,18 @@ def main():
         confirmation = input("Continue anyway? (y/n): ")
         if confirmation.lower() != 'y':
             return
+
+    # If dry run, show what would be sent and exit
+    if args.dry_run:
+        print("\n=== DRY RUN ===")
+        print(f"Provider: {args.provider}")
+        print(f"Model: {args.model}")
+        print("\nPrompt that would be sent:")
+        print("=" * 40)
+        print(args.prompt)
+        print("=" * 40)
+        print("\nNo API call will be made. Exiting.")
+        return
 
     # Query the model
     if args.provider == 'openai':

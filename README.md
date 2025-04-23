@@ -36,6 +36,7 @@ python generate_code_examples.py --provider [openai|anthropic] --model [model_na
 
 - `--prompt`: Custom prompt to use (defaults to the predefined prompt asking for coding examples)
 - `--list-models`: List available models from the specified provider and exit
+- `--dry-run`: Show what would be sent to the API without actually making the call
 
 ### Examples
 
@@ -57,6 +58,11 @@ python generate_code_examples.py --provider openai --list-models
 Listing available Anthropic models:
 ```bash
 python generate_code_examples.py --provider anthropic --list-models
+```
+
+Testing with dry run (no API call):
+```bash
+python generate_code_examples.py --provider openai --model gpt-4 --dry-run
 ```
 
 ## Output
