@@ -124,6 +124,17 @@ def list_anthropic_models(client: Anthropic) -> None:
         for model in sorted(models.data, key=lambda x: x.created_at):
             print(f"  - {model.id} ({model.display_name})")
 
+        # Add -latest aliases that aren't included in the API response
+        print("\nLatest model aliases:")
+        latest_aliases = [
+            "claude-3-7-sonnet-latest",
+            "claude-3-5-haiku-latest",
+            "claude-3-5-sonnet-latest",
+            "claude-3-opus-latest"
+        ]
+        for alias in latest_aliases:
+            print(f"  - {alias}")
+
     except Exception as e:
         print(f"Error displaying Anthropic models: {e}")
 
