@@ -1,0 +1,1 @@
+- Currently we don't concern ourselves with the possibility that the code is invalid (or contemplate this in our model instructions.) In fact, one of our generated examples already had a problem (the function was named 'function', which is a keyword.)
