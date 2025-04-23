@@ -22,6 +22,16 @@ except ImportError as e:
 # Load environment variables from .env file
 dotenv.load_dotenv()
 
+def ensure_output_directory(directory_path: str) -> None:
+    """
+    Ensure the specified output directory exists, creating it if necessary.
+
+    Args:
+        directory_path: Path to the directory
+    """
+    os.makedirs(directory_path, exist_ok=True)
+    print(f"Output directory ensured: {directory_path}")
+
 def create_openai_client() -> Optional[OpenAI]:
     """Create and return an OpenAI client if API key is available."""
     api_key = os.getenv("OPENAI_API_KEY")
@@ -157,13 +167,14 @@ def validate_model_name(provider: str, model_name: str) -> bool:
         return any(model_name.startswith(prefix) for prefix in valid_prefixes)
     return False
 
-def save_to_json(data: Dict[str, Any], filename_prefix: str) -> str:
+def save_to_json(data: Dict[str, Any], filename_prefix: str, output_dir: str = None) -> str:
     """
-    Save data to a timestamped JSON file.
+    Save data to a timestamped JSON file in the specified directory.
 
     Args:
         data: The data to save
         filename_prefix: Prefix for the filename
+        output_dir: Directory to save the file in (created if it doesn't exist)
 
     Returns:
         The path to the saved JSON file
@@ -171,15 +182,27 @@ def save_to_json(data: Dict[str, Any], filename_prefix: str) -> str:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     filename = f"{filename_prefix}_{timestamp}.json"
 
+    # Use the specified output directory or current directory
+    if output_dir:
+        ensure_output_directory(output_dir)
+        filepath = os.path.join(output_dir, filename)
+    else:
+        filepath = filename
+
     try:
-        with open(filename, "w", encoding="utf-8") as f:
+        with open(filepath, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
-        print(f"Results saved to {filename}")
+        print(f"Results saved to {filepath}")
     except Exception as e:
         print(f"Error saving results to file: {e}")
-        filename = f"{filename_prefix}_backup_{timestamp}.json"
-        with open(filename, "w", encoding="utf-8") as f:
+        backup_filename = f"{filename_prefix}_backup_{timestamp}.json"
+        if output_dir:
+            backup_filepath = os.path.join(output_dir, backup_filename)
+        else:
+            backup_filepath = backup_filename
+        with open(backup_filepath, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
-        print(f"Backup saved to {filename}")
+        print(f"Backup saved to {backup_filepath}")
+        return backup_filepath
 
-    return filename
+    return filepath

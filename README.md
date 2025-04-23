@@ -20,6 +20,11 @@ OPENAI_API_KEY=your_openai_api_key
 ANTHROPIC_API_KEY=your_anthropic_api_key
 ```
 
+3. Make sure the output directories exist (or they will be created automatically):
+```bash
+mkdir -p output/examples output/evals
+```
+
 Alternatively, you can set these environment variables directly in your shell.
 
 ## Script 1: Generate Code Examples
@@ -64,7 +69,9 @@ python generate_code_examples.py --provider openai --model gpt-4 --dry-run
 
 ### Output
 
-The script saves the results to a JSON file with a timestamp in the filename. Example: `code_examples_openai_gpt_4_20240601_123456.json`
+The script saves the results to a JSON file with a timestamp in the filename, in the `output/examples` directory.
+
+Example path: `output/examples/code_examples_openai_gpt_4_20240601_123456.json`
 
 ## Script 2: Evaluate Code Examples
 
@@ -92,22 +99,24 @@ python evaluate_code_examples.py --input-file [path_to_json_file] --provider [op
 
 Evaluating with OpenAI's GPT-4:
 ```bash
-python evaluate_code_examples.py --input-file code_examples_openai_gpt_4_20240601_123456.json --provider openai --model gpt-4
+python evaluate_code_examples.py --input-file output/examples/code_examples_openai_gpt_4_20240601_123456.json --provider openai --model gpt-4
 ```
 
 Evaluating only Python examples:
 ```bash
-python evaluate_code_examples.py --input-file code_examples_openai_gpt_4_20240601_123456.json --provider openai --model gpt-4 --language Python
+python evaluate_code_examples.py --input-file output/examples/code_examples_openai_gpt_4_20240601_123456.json --provider openai --model gpt-4 --language Python
 ```
 
 Testing with dry run (no API call):
 ```bash
-python evaluate_code_examples.py --input-file code_examples_openai_gpt_4_20240601_123456.json --provider openai --model gpt-4 --dry-run
+python evaluate_code_examples.py --input-file output/examples/code_examples_openai_gpt_4_20240601_123456.json --provider openai --model gpt-4 --dry-run
 ```
 
 ### Output
 
-The script saves the evaluation results to a JSON file with a timestamp in the filename. Example: `evaluation_openai_gpt_4_20240601_123456.json`
+The script saves the evaluation results to a JSON file with a timestamp in the filename, in the `output/evals` directory.
+
+Example path: `output/evals/evaluation_openai_gpt_4_20240601_123456.json`
 
 ## Workflow
 
@@ -120,7 +129,7 @@ The typical workflow is:
 
 2. Evaluate models on those examples using the second script:
    ```bash
-   python evaluate_code_examples.py --input-file [output_from_step1.json] --provider anthropic --model claude-3-opus-20240229
+   python evaluate_code_examples.py --input-file output/examples/code_examples_openai_gpt_4_*.json --provider anthropic --model claude-3-opus-20240229
    ```
 
 This allows you to:
@@ -136,3 +145,5 @@ This allows you to:
 - `ai_utils.py`: Shared utilities used by both scripts
 - `requirements.txt`: Required dependencies
 - `.env.example`: Template for API keys
+- `output/examples/`: Directory where generated examples are stored
+- `output/evals/`: Directory where evaluation results are stored

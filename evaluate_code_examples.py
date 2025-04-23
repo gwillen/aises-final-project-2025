@@ -150,7 +150,9 @@ def save_evaluation_to_json(example: Dict[str, Any], prompt: str, response: str,
         "match": extracted_answer.strip() == expected_answer.strip()
     }
 
-    return save_to_json(data, f"evaluation_{provider}_{model_name.replace('-', '_')}")
+    # Save to the output/evals directory
+    output_dir = "output/evals"
+    return save_to_json(data, f"evaluation_{provider}_{model_name.replace('-', '_')}", output_dir)
 
 def main():
     """Main function to parse arguments and execute the evaluation."""

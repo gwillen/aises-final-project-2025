@@ -127,7 +127,9 @@ def save_examples_to_json(prompt: str, response: str, examples: List[Dict[str, A
         "example_count": len(examples)
     }
 
-    return save_to_json(data, f"code_examples_{provider}_{model_name.replace('-', '_')}")
+    # Save to the output/examples directory
+    output_dir = "output/examples"
+    return save_to_json(data, f"code_examples_{provider}_{model_name.replace('-', '_')}", output_dir)
 
 def main():
     """Main function to parse arguments and execute the query."""
