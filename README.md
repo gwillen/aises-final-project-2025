@@ -28,13 +28,14 @@ python generate_code_examples.py --provider [openai|anthropic] --model [model_na
 ### Required Arguments
 
 - `--provider`: The API provider to use (`openai` or `anthropic`)
-- `--model`: The model name to use
+- `--model`: The model name to use (required unless using `--list-models`)
   - For OpenAI: e.g., `gpt-4`, `gpt-3.5-turbo`
   - For Anthropic: e.g., `claude-3-opus-20240229`, `claude-3-sonnet-20240229`
 
 ### Optional Arguments
 
 - `--prompt`: Custom prompt to use (defaults to the predefined prompt asking for coding examples)
+- `--list-models`: List available models from the specified provider and exit
 
 ### Examples
 
@@ -46,6 +47,16 @@ python generate_code_examples.py --provider openai --model gpt-4
 Using Anthropic's Claude:
 ```bash
 python generate_code_examples.py --provider anthropic --model claude-3-opus-20240229
+```
+
+Listing available OpenAI models:
+```bash
+python generate_code_examples.py --provider openai --list-models
+```
+
+Listing available Anthropic models:
+```bash
+python generate_code_examples.py --provider anthropic --list-models
 ```
 
 ## Output

@@ -12,7 +12,6 @@ import os
 import json
 import argparse
 import re
-import time
 import sys
 from datetime import datetime
 from typing import Dict, List, Optional, Any, Tuple
@@ -56,6 +55,70 @@ def create_anthropic_client() -> Optional[Anthropic]:
         print("Anthropic API key not found in environment or .env file")
         return None
     return Anthropic(api_key=api_key)
+
+def list_openai_models(client: OpenAI) -> None:
+    """
+    List available OpenAI models and print them to console.
+
+    Args:
+        client: OpenAI client
+    """
+    try:
+        print("Fetching available OpenAI models...")
+        models = client.models.list()
+
+        # Filter for chat completion models (typically what we want for this script)
+        chat_models = [model.id for model in models.data if "gpt" in model.id.lower()]
+        chat_models.sort()
+
+        print("\nAvailable OpenAI models for chat completion:")
+        for model in chat_models:
+            print(f"  - {model}")
+
+        print("\nTo use a model, run the script with:")
+        print(f"  python generate_code_examples.py --provider openai --model MODEL_NAME")
+        print("\nExample:")
+        if chat_models:
+            print(f"  python generate_code_examples.py --provider openai --model {chat_models[0]}")
+        else:
+            print(f"  python generate_code_examples.py --provider openai --model gpt-4")
+
+    except Exception as e:
+        print(f"Error fetching OpenAI models: {e}")
+
+def list_anthropic_models(client: Anthropic) -> None:
+    """
+    List available Anthropic models and print them to console.
+
+    Args:
+        client: Anthropic client
+    """
+    try:
+        # Anthropic API doesn't have a direct list models endpoint
+        # Instead, we'll list the currently known Claude models
+        claude_models = [
+            "claude-3-opus-20240229",
+            "claude-3-sonnet-20240229",
+            "claude-3-haiku-20240307",
+            "claude-2.1",
+            "claude-2.0",
+            "claude-instant-1.2"
+        ]
+
+        print("\nAvailable Anthropic Claude models:")
+        for model in claude_models:
+            print(f"  - {model}")
+
+        print("\nNote: This is a static list of known models. Anthropic may have added new models.")
+        print("Check Anthropic documentation for the most up-to-date list.")
+
+        print("\nTo use a model, run the script with:")
+        print(f"  python generate_code_examples.py --provider anthropic --model MODEL_NAME")
+        print("\nExample:")
+        print(f"  python generate_code_examples.py --provider anthropic --model claude-3-opus-20240229")
+
+    except Exception as e:
+        print(f"Error displaying Anthropic models: {e}")
 
 def query_openai(client: OpenAI, prompt: str, model_name: str) -> str:
     """
@@ -233,12 +296,40 @@ def main():
     parser = argparse.ArgumentParser(description='Generate code examples using AI APIs')
     parser.add_argument('--provider', choices=['openai', 'anthropic'], required=True,
                         help='API provider to use (openai or anthropic)')
-    parser.add_argument('--model', type=str, required=True,
+    parser.add_argument('--model', type=str,
                         help='Model name to use (e.g., gpt-4 for OpenAI, claude-3-opus-20240229 for Anthropic)')
     parser.add_argument('--prompt', type=str, default=DEFAULT_PROMPT,
                         help='Custom prompt to use (defaults to the predefined prompt)')
+    parser.add_argument('--list-models', action='store_true',
+                        help='List available models from the specified provider and exit')
 
     args = parser.parse_args()
+
+    # Create the appropriate client based on provider
+    client = None
+    if args.provider == 'openai':
+        client = create_openai_client()
+        if not client:
+            return
+
+        if args.list_models:
+            list_openai_models(client)
+            return
+
+    else:  # anthropic
+        client = create_anthropic_client()
+        if not client:
+            return
+
+        if args.list_models:
+            list_anthropic_models(client)
+            return
+
+    # Check if model is provided when not listing models
+    if not args.model:
+        print("Error: --model is required when not using --list-models")
+        parser.print_help()
+        return
 
     # Validate model name
     if not validate_model_name(args.provider, args.model):
@@ -247,17 +338,10 @@ def main():
         if confirmation.lower() != 'y':
             return
 
-    # Create the appropriate client based on provider
-    client = None
+    # Query the model
     if args.provider == 'openai':
-        client = create_openai_client()
-        if not client:
-            return
         response = query_openai(client, args.prompt, args.model)
     else:  # anthropic
-        client = create_anthropic_client()
-        if not client:
-            return
         response = query_anthropic(client, args.prompt, args.model)
 
     if not response:
