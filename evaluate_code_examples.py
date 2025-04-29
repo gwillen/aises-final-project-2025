@@ -136,7 +136,7 @@ def save_evaluation_to_json(example: Dict[str, Any], prompt: str, response: str,
         The path to the saved JSON file
     """
     extracted_answer = extract_final_answer(response)
-    expected_answer = example.get('answer', '')
+    expected_answer = example.get('verified_answer', example.get('answer', ''))
 
     data = {
         "timestamp": datetime.now().strftime("%Y%m%d_%H%M%S"),
@@ -218,6 +218,7 @@ def main():
     # Create the prompt
     prompt = EVALUATION_PROMPT_TEMPLATE.format(code=example['code'])
 
+    expected_answer = example.get('verified_answer', example.get('answer', ''))
     # If dry run, show what would be sent and exit
     if args.dry_run:
         print("\n=== DRY RUN ===")
@@ -226,7 +227,7 @@ def main():
         print(f"\nExample selected:")
         print(f"Language: {example['language']}")
         print(f"Difficulty: {example['difficulty']}")
-        print(f"Expected Answer: {example['answer']}")
+        print(f"Expected Answer: {expected_answer}")
         print("\nPrompt that would be sent:")
         print("=" * 40)
         print(prompt)
@@ -246,7 +247,6 @@ def main():
 
     # Extract the answer
     extracted_answer = extract_final_answer(response)
-    expected_answer = example.get('answer', '')
 
     print("\nEvaluation Results:")
     print(f"Language: {example['language']}")
