@@ -154,6 +154,121 @@ def save_evaluation_to_json(example: Dict[str, Any], prompt: str, response: str,
     output_dir = "output/evals"
     return save_to_json(data, f"evaluation_{provider}_{model_name.replace('-', '_')}", output_dir)
 
+def save_multiple_evaluations_to_json(evaluations: List[Dict[str, Any]], model_name: str, provider: str) -> str:
+    """
+    Save multiple evaluations data to a single JSON file.
+
+    Args:
+        evaluations: List of evaluation results
+        model_name: The name of the model used
+        provider: The API provider (OpenAI or Anthropic)
+
+    Returns:
+        The path to the saved JSON file
+    """
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    # Calculate summary statistics
+    total = len(evaluations)
+    matches = sum(1 for eval in evaluations if eval.get("match", False))
+    match_rate = (matches / total) * 100 if total > 0 else 0
+
+    # Group by language and difficulty
+    by_language = {}
+    by_difficulty = {}
+
+    for eval in evaluations:
+        example = eval.get("example", {})
+        lang = example.get("language", "unknown").lower()
+        difficulty = example.get("difficulty", "?")
+
+        if lang not in by_language:
+            by_language[lang] = {
+                "total": 0,
+                "matches": 0,
+                "by_difficulty": {}
+            }
+
+        by_language[lang]["total"] += 1
+        if eval.get("match", False):
+            by_language[lang]["matches"] += 1
+
+        # Group by difficulty within language
+        if difficulty not in by_language[lang]["by_difficulty"]:
+            by_language[lang]["by_difficulty"][difficulty] = {
+                "total": 0,
+                "matches": 0
+            }
+
+        by_language[lang]["by_difficulty"][difficulty]["total"] += 1
+        if eval.get("match", False):
+            by_language[lang]["by_difficulty"][difficulty]["matches"] += 1
+
+        if difficulty not in by_difficulty:
+            by_difficulty[difficulty] = {
+                "total": 0,
+                "matches": 0
+            }
+
+        by_difficulty[difficulty]["total"] += 1
+        if eval.get("match", False):
+            by_difficulty[difficulty]["matches"] += 1
+
+    data = {
+        "timestamp": timestamp,
+        "provider": provider,
+        "model": model_name,
+        "total_examples": total,
+        "total_matches": matches,
+        "match_rate": f"{match_rate:.2f}%",
+        "by_language": by_language,
+        "evaluations": evaluations
+    }
+
+    # Save to the output/evals directory
+    output_dir = "output/evals"
+    return save_to_json(data, f"batch_evaluation_{provider}_{model_name.replace('-', '_')}", output_dir)
+
+def evaluate_example(client, example: Dict[str, Any], model_name: str, provider: str) -> Dict[str, Any]:
+    """
+    Evaluate a single example and return the evaluation results.
+
+    Args:
+        client: The API client to use
+        example: The example to evaluate
+        model_name: The name of the model to use
+        provider: The API provider (OpenAI or Anthropic)
+
+    Returns:
+        A dictionary with the evaluation results
+    """
+    # Create the prompt
+    prompt = EVALUATION_PROMPT_TEMPLATE.format(code=example['code'])
+
+    # Query the model
+    if provider == 'openai':
+        response = query_openai(client, prompt, model_name)
+    else:  # anthropic
+        response = query_anthropic(client, prompt, model_name)
+
+    if not response:
+        print(f"No response received from the API for example: {example.get('language', 'Unknown')} difficulty {example.get('difficulty', '?')}")
+        return None
+
+    # Extract the answer
+    extracted_answer = extract_final_answer(response)
+    expected_answer = example.get('verified_answer', example.get('answer', ''))
+
+    # Create evaluation result
+    return {
+        "example": example,
+        "prompt": prompt,
+        "full_response": response,
+        "extracted_answer": extracted_answer,
+        "expected_answer": expected_answer,
+        "match": extracted_answer.strip() == expected_answer.strip()
+    }
+
 def main():
     """Main function to parse arguments and execute the evaluation."""
     parser = argparse.ArgumentParser(description='Evaluate AI models on code examples')
@@ -169,6 +284,8 @@ def main():
                         help='List available models from the specified provider and exit')
     parser.add_argument('--dry-run', action='store_true',
                         help='Show what would be sent to the API without actually making the call')
+    parser.add_argument('--run-all', action='store_true',
+                        help='Run evaluation on all examples in the input file')
 
     args = parser.parse_args()
 
@@ -210,7 +327,59 @@ def main():
     if not examples:
         return
 
-    # Select a random example
+    # Filter by language if specified
+    if args.language:
+        matching_examples = [ex for ex in examples if ex.get('language', '').lower() == args.language.lower()]
+        if not matching_examples:
+            print(f"No examples found for language: {args.language}")
+            print(f"Available languages: {', '.join(set(ex.get('language', '') for ex in examples))}")
+            return
+        examples = matching_examples
+
+    # If run-all is specified, evaluate all examples
+    if args.run_all:
+        if args.dry_run:
+            print("\n=== DRY RUN ===")
+            print(f"Provider: {args.provider}")
+            print(f"Model: {args.model}")
+            print(f"\nWould evaluate {len(examples)} examples.")
+            print("No API calls will be made. Exiting.")
+            return
+
+        print(f"Running evaluation on {len(examples)} examples. This may take a while...")
+        evaluations = []
+        correct_count = 0
+
+        for i, example in enumerate(examples, 1):
+            print(f"[{i}/{len(examples)}] Evaluating {example['language']} example (difficulty {example.get('difficulty', '?')})...", end="", flush=True)
+
+            evaluation = evaluate_example(client, example, args.model, args.provider)
+            if evaluation:
+                evaluations.append(evaluation)
+                if evaluation["match"]:
+                    result = "✓ CORRECT"
+                    correct_count += 1
+                else:
+                    result = "✗ WRONG"
+
+                print(f" {result}")
+                print(f"  Expected: {evaluation['expected_answer']}")
+                print(f"  Model's answer: {evaluation['extracted_answer']}")
+            else:
+                print(" ERROR")
+
+        # Save all evaluations to a single file
+        filename = save_multiple_evaluations_to_json(evaluations, args.model, args.provider)
+
+        # Print summary
+        match_rate = (correct_count / len(evaluations)) * 100 if evaluations else 0
+        print("\n=== Evaluation Summary ===")
+        print(f"Total examples: {len(evaluations)}")
+        print(f"Correct answers: {correct_count} ({match_rate:.2f}%)")
+        print(f"Results saved to {filename}")
+        return
+
+    # If not run-all, select a random example (original behavior)
     example = select_random_example(examples, args.language)
     if not example:
         return
