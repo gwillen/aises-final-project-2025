@@ -200,3 +200,75 @@ This workflow allows you to:
 - `output/examples/`: Directory where generated examples are stored
 - `output/evals/`: Directory where evaluation results are stored
 - `output/verified/`: Directory where verification results are stored
+
+# Code Examples Runner
+
+This script runs code examples in different programming languages (C, Python, JavaScript) and verifies their outputs.
+
+## Recent Enhancements
+
+1. **Proper C Program Handling**
+   - Added automatic detection and injection of a `main()` function for C programs
+   - Includes intelligent detection of function names and return types
+   - Handles various C code structures and formats
+
+2. **Verified Answers**
+   - Changed from keeping original AI-provided answers to using verified results from actual code execution
+   - Replaced `answer` key with `verified_answer` containing the actual output
+   - Added tracking for answer changes across verification runs
+
+3. **Debugging Support**
+   - Added `--debug` flag to show detailed diagnostic information
+   - Shows intermediate code generation and execution details
+   - Helps troubleshoot execution problems
+
+4. **Skip Already Verified Examples**
+   - Added `--skip-verified` flag to skip examples that already have verified answers
+   - Useful for large datasets where you only want to process new or changed examples
+
+## Usage
+
+```bash
+python3 run_code_examples.py --input-file [file.json] [options]
+```
+
+### Options
+
+- `--input-file`: Path to JSON file containing code examples (required)
+- `--language`: Filter examples by language (e.g., Python, C, JavaScript)
+- `--verbose`: Show detailed output for each example
+- `--debug`: Show additional debugging information
+- `--skip-verified`: Skip examples that already have verified answers
+
+## JSON Format
+
+The script expects input files in this format:
+
+```json
+{
+  "examples": [
+    {
+      "language": "C",
+      "difficulty": 5,
+      "code": "int function() { ... }"
+    }
+  ]
+}
+```
+
+After verification, it generates output with:
+
+```json
+{
+  "examples": [
+    {
+      "language": "C",
+      "difficulty": 5,
+      "code": "int function() { ... }",
+      "verified_answer": "25",
+      "success": true
+    }
+  ],
+  "verification_timestamp": "..."
+}
+```
