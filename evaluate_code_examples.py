@@ -38,13 +38,34 @@ What does this program output? Please provide only your best immediate guess at 
 ```
 """
 
-CONFIDENCE_PROMPT_TEMPLATE = """
+# Confidence prompt strategies
+CONFIDENCE_PROMPTS = {
+    "standard": {
+        "description": "Standard probability estimation (0-100% or 0-1)",
+        "template": """
 In a moment, I will ask you what this program outputs. You will have to provide only your best immediate guess at the final answer, without reasoning, analysis, or commentary. Before I do that, first I want to evaluate your confidence that you can answer correctly. Please give me an estimate of your probability that your answer will be correct. Again, please give only the estimate, on a line by itself, without reasoning, analysis, or commentary.
 
 ```
 {code}
 ```
-"""
+""",
+        "extract_func": "extract_standard_confidence"
+    },
+    "inverse": {
+        "description": "Ask for 1/p formulation: number of examples to get one wrong",
+        "template": """
+In a moment, I will ask you what this program outputs. You will have to provide only your best immediate guess at the final answer, without reasoning, analysis, or commentary. Before I do that, first I want to evaluate your confidence that you can answer correctly. Please give me an estimate of the probability p that your answer is correct, written as 1/p: the number of similar examples you would expect to solve, in order to get one wrong, on average. Again, please give only the estimate, on a line by itself, without reasoning, analysis, or commentary.
+
+```
+{code}
+```
+""",
+        "extract_func": "extract_inverse_confidence"
+    }
+}
+
+# Default confidence prompt strategy
+DEFAULT_CONFIDENCE_STRATEGY = "standard"
 
 def load_examples_from_json(file_path: str) -> List[Dict[str, Any]]:
     """
@@ -129,16 +150,15 @@ def extract_final_answer(response: str) -> str:
 
     return response.strip()
 
-# TODO: check how actual models format their responses, and try to coach them to use a standardized format.
-def extract_confidence(response: str) -> float:
+def extract_standard_confidence(response: str) -> float:
     """
-    Extract the confidence estimate from the response.
+    Extract the confidence estimate as a standard probability (0-1) from the response.
 
     Args:
         response: The full response from the AI
 
     Returns:
-        The extracted confidence as a float between 0 and 1
+        The extracted confidence as a float between 0 and 1, or None if extraction fails
     """
     # Look for percentage or decimal value
     response = response.strip()
@@ -151,7 +171,7 @@ def extract_confidence(response: str) -> float:
 
         # Try to extract a percentage or decimal
         # Check for percentage format (e.g., "90%" or "90 percent")
-        percentage_match = re.search(r'(\d+)(?:\s*%|\s+percent)', line)
+        percentage_match = re.search(r'(\d+(?:\.\d+)?)(?:\s*%|\s+percent)', line)
         if percentage_match:
             try:
                 percentage = float(percentage_match.group(1))
@@ -193,6 +213,95 @@ def extract_confidence(response: str) -> float:
     # Default to None if we couldn't extract anything
     return None
 
+def extract_inverse_confidence(response: str) -> float:
+    """
+    Extract the confidence estimate from a 1/p formulation (number of examples until one error).
+
+    Args:
+        response: The full response from the AI
+
+    Returns:
+        The extracted confidence as a float between 0 and 1, or None if extraction fails
+    """
+    response = response.strip()
+
+    # Look for formats like "1/10", "10", or "10:1"
+    for line in response.split('\n'):
+        line = line.strip()
+        if not line:
+            continue
+
+        # Try to extract ratios like "10:1" or "10 to 1"
+        ratio_match = re.search(r'(\d+(?:\.\d+)?)\s*(?::|to)\s*1', line)
+        if ratio_match:
+            try:
+                ratio = float(ratio_match.group(1))
+                if ratio > 0:
+                    return (ratio - 1) / ratio  # Convert to probability
+                return None
+            except ValueError:
+                pass
+
+        # Look for "1 in X" format
+        one_in_x_match = re.search(r'1\s+in\s+(\d+(?:\.\d+)?)', line)
+        if one_in_x_match:
+            try:
+                x = float(one_in_x_match.group(1))
+                if x > 0:
+                    return 1 - (1 / x)  # Convert to probability
+                return None
+            except ValueError:
+                pass
+
+        # Try to extract fractions like "1/10"
+        inverse_fraction_match = re.search(r'1\s*/\s*(\d+(?:\.\d+)?)', line)
+        if inverse_fraction_match:
+            try:
+                denominator = float(inverse_fraction_match.group(1))
+                if denominator > 0:
+                    return 1 - (1 / denominator)  # Convert to probability
+                return None
+            except ValueError:
+                pass
+
+        # Just a number (assumed to be the number of examples until error)
+        solo_number_match = re.search(r'^(\d+(?:\.\d+)?)$', line)
+        if solo_number_match:
+            try:
+                number = float(solo_number_match.group(1))
+                if number > 0:
+                    return (number - 1) / number  # Convert to probability
+                return None
+            except ValueError:
+                pass
+
+    # Default to None if we couldn't extract anything
+    return None
+
+def extract_confidence(response: str, strategy: str = DEFAULT_CONFIDENCE_STRATEGY) -> float:
+    """
+    Extract the confidence estimate from the response using the specified strategy.
+
+    Args:
+        response: The full response from the AI
+        strategy: The confidence extraction strategy to use
+
+    Returns:
+        The extracted confidence as a float between 0 and 1, or None if extraction fails
+    """
+    if strategy not in CONFIDENCE_PROMPTS:
+        strategy = DEFAULT_CONFIDENCE_STRATEGY
+
+    extract_func_name = CONFIDENCE_PROMPTS[strategy]["extract_func"]
+
+    # Call the appropriate extraction function
+    if extract_func_name == "extract_standard_confidence":
+        return extract_standard_confidence(response)
+    elif extract_func_name == "extract_inverse_confidence":
+        return extract_inverse_confidence(response)
+    else:
+        return extract_standard_confidence(response)  # Fallback to standard
+
 def save_evaluation_to_json(example: Dict[str, Any], prompt: str, response: str,
                            model_name: str, provider: str) -> str:
     """
@@ -227,6 +336,30 @@ def save_evaluation_to_json(example: Dict[str, Any], prompt: str, response: str,
     output_dir = "output/evals"
     return save_to_json(data, f"evaluation_{provider}_{model_name.replace('-', '_')}", output_dir)
 
+def save_single_evaluation_with_confidence(evaluation: Dict[str, Any], model_name: str, provider: str) -> str:
+    """
+    Save a single evaluation with confidence data to a JSON file.
+
+    Args:
+        evaluation: The evaluation result including confidence data
+        model_name: The name of the model used
+        provider: The API provider (OpenAI or Anthropic)
+
+    Returns:
+        The path to the saved JSON file
+    """
+    data = {
+        "timestamp": datetime.now().strftime("%Y%m%d_%H%M%S"),
+        "provider": provider,
+        "model": model_name,
+        "confidence_strategies": evaluation.get("confidence_strategies", []),
+        **evaluation
+    }
+
+    # Save to the output/evals directory
+    output_dir = "output/evals"
+    return save_to_json(data, f"evaluation_with_confidence_{provider}_{model_name.replace('-', '_')}", output_dir)
+
 def save_multiple_evaluations_to_json(evaluations: List[Dict[str, Any]], model_name: str, provider: str) -> str:
     """
     Save multiple evaluations data to a single JSON file.
@@ -246,16 +379,48 @@ def save_multiple_evaluations_to_json(evaluations: List[Dict[str, Any]], model_n
     matches = sum(1 for eval in evaluations if eval.get("match", False))
     match_rate = (matches / total) * 100 if total > 0 else 0
 
-    # Calculate confidence statistics
-    avg_confidence = sum(eval.get("confidence") for eval in evaluations if "confidence" in eval) / total if total > 0 else None
-    missing_confidence = sum(1 for eval in evaluations if "confidence" not in eval)
+    # Identify all confidence strategies used
+    all_strategies = set()
+    for eval in evaluations:
+        if "confidence_results" in eval:
+            all_strategies.update(eval["confidence_results"].keys())
 
-    # Calculate calibration: how well confidence predicts correctness
-    correct_confidences = [eval.get("confidence") for eval in evaluations if "confidence" in eval and eval.get("match", False)]
-    incorrect_confidences = [eval.get("confidence") for eval in evaluations if "confidence" in eval and not eval.get("match", False) and "match" in eval]
+    # Calculate confidence statistics for each strategy
+    confidence_stats = {}
+    for strategy in all_strategies:
+        strategy_data = {
+            "total_confidence": 0,
+            "valid_count": 0,
+            "avg_confidence": None,
+            "correct_confidences": [],
+            "incorrect_confidences": [],
+            "avg_confidence_when_correct": None,
+            "avg_confidence_when_incorrect": None
+        }
 
-    avg_confidence_when_correct = sum(correct_confidences) / len(correct_confidences) if correct_confidences else 0
-    avg_confidence_when_incorrect = sum(incorrect_confidences) / len(incorrect_confidences) if incorrect_confidences else 0
+        for eval in evaluations:
+            if "confidence_results" in eval and strategy in eval["confidence_results"]:
+                confidence = eval["confidence_results"][strategy].get("confidence")
+                if confidence is not None:
+                    strategy_data["total_confidence"] += confidence
+                    strategy_data["valid_count"] += 1
+
+                    if eval.get("match", False):
+                        strategy_data["correct_confidences"].append(confidence)
+                    else:
+                        strategy_data["incorrect_confidences"].append(confidence)
+
+        # Calculate averages
+        if strategy_data["valid_count"] > 0:
+            strategy_data["avg_confidence"] = strategy_data["total_confidence"] / strategy_data["valid_count"]
+
+        if strategy_data["correct_confidences"]:
+            strategy_data["avg_confidence_when_correct"] = sum(strategy_data["correct_confidences"]) / len(strategy_data["correct_confidences"])
+
+        if strategy_data["incorrect_confidences"]:
+            strategy_data["avg_confidence_when_incorrect"] = sum(strategy_data["incorrect_confidences"]) / len(strategy_data["incorrect_confidences"])
+
+        confidence_stats[strategy] = strategy_data
 
     # Group by language and difficulty
     by_language = {}
@@ -266,19 +431,33 @@ def save_multiple_evaluations_to_json(evaluations: List[Dict[str, Any]], model_n
         lang = example.get("language", "unknown").lower()
         difficulty = example.get("difficulty", "?")
 
+        # Initialize language data if needed
         if lang not in by_language:
             by_language[lang] = {
                 "total": 0,
                 "matches": 0,
                 "by_difficulty": {},
-                "avg_confidence": 0,
-                "total_confidence": 0,
-                "missing_confidence": 0
+                "by_confidence_strategy": {}
             }
 
+            # Initialize confidence data for each strategy
+            for strategy in all_strategies:
+                by_language[lang]["by_confidence_strategy"][strategy] = {
+                    "total_confidence": 0,
+                    "valid_count": 0,
+                    "avg_confidence": None
+                }
+
         by_language[lang]["total"] += 1
-        by_language[lang]["total_confidence"] += eval.get("confidence", 0)
-        by_language[lang]["missing_confidence"] += 1 if "confidence" not in eval else 0
+
+        # Update confidence data for each strategy
+        for strategy in all_strategies:
+            if "confidence_results" in eval and strategy in eval["confidence_results"]:
+                confidence = eval["confidence_results"][strategy].get("confidence")
+                if confidence is not None:
+                    by_language[lang]["by_confidence_strategy"][strategy]["total_confidence"] += confidence
+                    by_language[lang]["by_confidence_strategy"][strategy]["valid_count"] += 1
+
         if eval.get("match", False):
             by_language[lang]["matches"] += 1
 
@@ -287,44 +466,77 @@ def save_multiple_evaluations_to_json(evaluations: List[Dict[str, Any]], model_n
             by_language[lang]["by_difficulty"][difficulty] = {
                 "total": 0,
                 "matches": 0,
-                "total_confidence": 0,
-                "avg_confidence": 0,
-                "missing_confidence": 0
+                "by_confidence_strategy": {}
             }
 
+            # Initialize confidence data for each strategy
+            for strategy in all_strategies:
+                by_language[lang]["by_difficulty"][difficulty]["by_confidence_strategy"][strategy] = {
+                    "total_confidence": 0,
+                    "valid_count": 0,
+                    "avg_confidence": None
+                }
+
         by_language[lang]["by_difficulty"][difficulty]["total"] += 1
-        by_language[lang]["by_difficulty"][difficulty]["total_confidence"] += eval.get("confidence", 0)
-        by_language[lang]["by_difficulty"][difficulty]["missing_confidence"] += 1 if "confidence" not in eval else 0
+
+        # Update confidence data for difficulty level and strategy
+        for strategy in all_strategies:
+            if "confidence_results" in eval and strategy in eval["confidence_results"]:
+                confidence = eval["confidence_results"][strategy].get("confidence")
+                if confidence is not None:
+                    by_language[lang]["by_difficulty"][difficulty]["by_confidence_strategy"][strategy]["total_confidence"] += confidence
+                    by_language[lang]["by_difficulty"][difficulty]["by_confidence_strategy"][strategy]["valid_count"] += 1
 
         if eval.get("match", False):
             by_language[lang]["by_difficulty"][difficulty]["matches"] += 1
 
+        # Initialize difficulty data if needed
         if difficulty not in by_difficulty:
             by_difficulty[difficulty] = {
                 "total": 0,
                 "matches": 0,
-                "total_confidence": 0,
-                "avg_confidence": 0,
-                "missing_confidence": 0
+                "by_confidence_strategy": {}
             }
 
+            # Initialize confidence data for each strategy
+            for strategy in all_strategies:
+                by_difficulty[difficulty]["by_confidence_strategy"][strategy] = {
+                    "total_confidence": 0,
+                    "valid_count": 0,
+                    "avg_confidence": None
+                }
+
         by_difficulty[difficulty]["total"] += 1
-        by_difficulty[difficulty]["total_confidence"] += eval.get("confidence", 0)
-        by_difficulty[difficulty]["missing_confidence"] += 1 if "confidence" not in eval else 0
+
+        # Update confidence data for each strategy
+        for strategy in all_strategies:
+            if "confidence_results" in eval and strategy in eval["confidence_results"]:
+                confidence = eval["confidence_results"][strategy].get("confidence")
+                if confidence is not None:
+                    by_difficulty[difficulty]["by_confidence_strategy"][strategy]["total_confidence"] += confidence
+                    by_difficulty[difficulty]["by_confidence_strategy"][strategy]["valid_count"] += 1
 
         if eval.get("match", False):
             by_difficulty[difficulty]["matches"] += 1
 
-    # Calculate average confidence for each category
+    # Calculate average confidence for each category and strategy
     for lang in by_language:
-        by_language[lang]["avg_confidence"] = by_language[lang]["total_confidence"] / (by_language[lang]["total"] - by_language[lang]["missing_confidence"]) if by_language[lang]["total"] > 0 else 0
+        for strategy in all_strategies:
+            strategy_data = by_language[lang]["by_confidence_strategy"][strategy]
+            if strategy_data["valid_count"] > 0:
+                strategy_data["avg_confidence"] = strategy_data["total_confidence"] / strategy_data["valid_count"]
 
         for diff in by_language[lang]["by_difficulty"]:
-            diff_data = by_language[lang]["by_difficulty"][diff]
-            diff_data["avg_confidence"] = diff_data["total_confidence"] / (diff_data["total"] - diff_data["missing_confidence"]) if diff_data["total"] > 0 else 0
+            for strategy in all_strategies:
+                strategy_data = by_language[lang]["by_difficulty"][diff]["by_confidence_strategy"][strategy]
+                if strategy_data["valid_count"] > 0:
+                    strategy_data["avg_confidence"] = strategy_data["total_confidence"] / strategy_data["valid_count"]
 
     for diff in by_difficulty:
-        by_difficulty[diff]["avg_confidence"] = by_difficulty[diff]["total_confidence"] / (by_difficulty[diff]["total"] - by_difficulty[diff]["missing_confidence"]) if by_difficulty[diff]["total"] > 0 else 0
+        for strategy in all_strategies:
+            strategy_data = by_difficulty[diff]["by_confidence_strategy"][strategy]
+            if strategy_data["valid_count"] > 0:
+                strategy_data["avg_confidence"] = strategy_data["total_confidence"] / strategy_data["valid_count"]
 
     data = {
         "timestamp": timestamp,
@@ -333,10 +545,8 @@ def save_multiple_evaluations_to_json(evaluations: List[Dict[str, Any]], model_n
         "total_examples": total,
         "total_matches": matches,
         "match_rate": f"{match_rate:.2f}%",
-        "avg_confidence": avg_confidence,
-        "avg_confidence_when_correct": avg_confidence_when_correct,
-        "avg_confidence_when_incorrect": avg_confidence_when_incorrect,
-        "missing_confidence": missing_confidence,
+        "confidence_strategies": list(all_strategies),
+        "confidence_stats": confidence_stats,
         "by_language": by_language,
         "by_difficulty": by_difficulty,
         "evaluations": evaluations
@@ -346,7 +556,8 @@ def save_multiple_evaluations_to_json(evaluations: List[Dict[str, Any]], model_n
     output_dir = "output/evals"
     return save_to_json(data, f"batch_evaluation_{provider}_{model_name.replace('-', '_')}", output_dir)
 
-def evaluate_example(client, example: Dict[str, Any], model_name: str, provider: str) -> Dict[str, Any]:
+def evaluate_example(client, example: Dict[str, Any], model_name: str, provider: str,
+                    confidence_strategies: List[str] = None) -> Dict[str, Any]:
     """
     Evaluate a single example and return the evaluation results.
 
@@ -355,23 +566,47 @@ def evaluate_example(client, example: Dict[str, Any], model_name: str, provider:
         example: The example to evaluate
         model_name: The name of the model to use
         provider: The API provider (OpenAI or Anthropic)
+        confidence_strategies: List of confidence strategies to use (default: [DEFAULT_CONFIDENCE_STRATEGY])
 
     Returns:
         A dictionary with the evaluation results
     """
-    # First, get confidence estimate
-    confidence_prompt = CONFIDENCE_PROMPT_TEMPLATE.format(code=example['code'])
+    # Use default confidence strategy if none specified
+    if not confidence_strategies:
+        confidence_strategies = [DEFAULT_CONFIDENCE_STRATEGY]
 
-    if provider == 'openai':
-        confidence_response = query_openai(client, confidence_prompt, model_name)
-    else:  # anthropic
-        confidence_response = query_anthropic(client, confidence_prompt, model_name)
+    # Make sure all strategies are valid
+    confidence_strategies = [s for s in confidence_strategies if s in CONFIDENCE_PROMPTS]
+    if not confidence_strategies:
+        confidence_strategies = [DEFAULT_CONFIDENCE_STRATEGY]
 
-    confidence = None
-    if confidence_response:
-        confidence = extract_confidence(confidence_response)
+    # Dictionary to hold confidence results
+    confidence_results = {}
 
-    # Then, evaluate the example
+    # Evaluate confidence for each strategy
+    for strategy in confidence_strategies:
+        # Get the prompt template for this strategy
+        confidence_prompt = CONFIDENCE_PROMPTS[strategy]["template"].format(code=example['code'])
+
+        # Query the model
+        if provider == 'openai':
+            confidence_response = query_openai(client, confidence_prompt, model_name)
+        else:  # anthropic
+            confidence_response = query_anthropic(client, confidence_prompt, model_name)
+
+        # Extract confidence using the appropriate function
+        confidence = None
+        if confidence_response:
+            confidence = extract_confidence(confidence_response, strategy)
+
+        # Store results
+        confidence_results[strategy] = {
+            "prompt": confidence_prompt,
+            "response": confidence_response,
+            "confidence": confidence
+        }
+
+    # Now evaluate the actual example
     prompt = EVALUATION_PROMPT_TEMPLATE.format(code=example['code'])
 
     if provider == 'openai':
@@ -387,18 +622,23 @@ def evaluate_example(client, example: Dict[str, Any], model_name: str, provider:
     extracted_answer = extract_final_answer(response)
     expected_answer = example.get('verified_answer', example.get('answer', ''))
 
-    # Create evaluation result
-    return {
+    # Create evaluation result with combined confidence data
+    result = {
         "example": example,
         "prompt": prompt,
-        "confidence_prompt": confidence_prompt,
-        "confidence_response": confidence_response,
-        "confidence": confidence,
         "full_response": response,
         "extracted_answer": extracted_answer,
         "expected_answer": expected_answer,
-        "match": extracted_answer.strip() == expected_answer.strip()
+        "match": extracted_answer.strip() == expected_answer.strip(),
+        "confidence_strategies": confidence_strategies,
+        "confidence_results": confidence_results
     }
+
+    # Add first confidence as the primary one for backward compatibility
+    primary_strategy = confidence_strategies[0]
+    result["confidence"] = confidence_results[primary_strategy]["confidence"]
+
+    return result
 
 def main():
     """Main function to parse arguments and execute the evaluation."""
@@ -417,8 +657,19 @@ def main():
                         help='Show what would be sent to the API without actually making the call')
     parser.add_argument('--run-all', action='store_true',
                         help='Run evaluation on all examples in the input file')
+    parser.add_argument('--confidence-strategies', type=str, default=DEFAULT_CONFIDENCE_STRATEGY,
+                        help=f'Comma-separated list of confidence strategies to use. Available: {", ".join(CONFIDENCE_PROMPTS.keys())}')
+    parser.add_argument('--list-confidence-strategies', action='store_true',
+                        help='List available confidence strategies and exit')
 
     args = parser.parse_args()
+
+    # List confidence strategies if requested
+    if args.list_confidence_strategies:
+        print("Available confidence estimation strategies:")
+        for strategy, details in CONFIDENCE_PROMPTS.items():
+            print(f"  - {strategy}: {details['description']}")
+        return
 
     # Create the appropriate client based on provider
     client = None
@@ -453,6 +704,15 @@ def main():
         if confirmation.lower() != 'y':
             return
 
+    # Parse confidence strategies
+    confidence_strategies = [s.strip() for s in args.confidence_strategies.split(",")]
+    invalid_strategies = [s for s in confidence_strategies if s not in CONFIDENCE_PROMPTS]
+    if invalid_strategies:
+        print(f"Warning: Unknown confidence strategies: {', '.join(invalid_strategies)}")
+        print(f"Available strategies: {', '.join(CONFIDENCE_PROMPTS.keys())}")
+        print(f"Using default strategy: {DEFAULT_CONFIDENCE_STRATEGY}")
+        confidence_strategies = [DEFAULT_CONFIDENCE_STRATEGY]
+
     # Load examples from JSON file
     examples = load_examples_from_json(args.input_file)
     if not examples:
@@ -473,23 +733,35 @@ def main():
             print("\n=== DRY RUN ===")
             print(f"Provider: {args.provider}")
             print(f"Model: {args.model}")
+            print(f"Confidence strategies: {', '.join(confidence_strategies)}")
             print(f"\nWould evaluate {len(examples)} examples.")
             print("No API call will be made. Exiting.")
             return
 
         print(f"Running evaluation on {len(examples)} examples. This may take a while...")
+        print(f"Using confidence strategies: {', '.join(confidence_strategies)}")
         evaluations = []
         correct_count = 0
-        total_confidence = 0
+        total_confidence = {strategy: 0 for strategy in confidence_strategies}
+        valid_confidence_count = {strategy: 0 for strategy in confidence_strategies}
 
         for i, example in enumerate(examples, 1):
             print(f"[{i}/{len(examples)}] Evaluating {example['language']} example (difficulty {example.get('difficulty', '?')})...", end="", flush=True)
 
-            evaluation = evaluate_example(client, example, args.model, args.provider)
+            evaluation = evaluate_example(client, example, args.model, args.provider, confidence_strategies)
             if evaluation:
                 evaluations.append(evaluation)
-                confidence = evaluation.get("confidence", 0)
-                total_confidence += confidence
+
+                # Track confidence for each strategy
+                for strategy in confidence_strategies:
+                    confidence = evaluation["confidence_results"][strategy]["confidence"]
+                    if confidence is not None:
+                        total_confidence[strategy] += confidence
+                        valid_confidence_count[strategy] += 1
+
+                # Use primary confidence for display
+                primary_confidence = evaluation.get("confidence")
+                confidence_display = f" (confidence: {primary_confidence:.2f})" if primary_confidence is not None else ""
 
                 if evaluation["match"]:
                     result = "✓ CORRECT"
@@ -497,9 +769,16 @@ def main():
                 else:
                     result = "✗ WRONG"
 
-                print(f" {result} (confidence: {confidence:.2f})")
+                print(f" {result}{confidence_display}")
                 print(f"  Expected: {evaluation['expected_answer']}")
                 print(f"  Model's answer: {evaluation['extracted_answer']}")
+
+                # Show all confidence values if there are multiple strategies
+                if len(confidence_strategies) > 1:
+                    for strategy in confidence_strategies:
+                        conf = evaluation["confidence_results"][strategy]["confidence"]
+                        if conf is not None:
+                            print(f"  {strategy} confidence: {conf:.2f}")
             else:
                 print(" ERROR")
 
@@ -508,12 +787,17 @@ def main():
 
         # Print summary
         match_rate = (correct_count / len(evaluations)) * 100 if evaluations else 0
-        avg_confidence = total_confidence / len(evaluations) if evaluations else 0
 
         print("\n=== Evaluation Summary ===")
         print(f"Total examples: {len(evaluations)}")
         print(f"Correct answers: {correct_count} ({match_rate:.2f}%)")
-        print(f"Average confidence: {avg_confidence:.2f}")
+
+        # Print confidence summaries for each strategy
+        for strategy in confidence_strategies:
+            if valid_confidence_count[strategy] > 0:
+                avg_confidence = total_confidence[strategy] / valid_confidence_count[strategy]
+                print(f"{strategy} average confidence: {avg_confidence:.2f} (valid: {valid_confidence_count[strategy]}/{len(evaluations)})")
+
         print(f"Results saved to {filename}")
         return
 
@@ -522,48 +806,58 @@ def main():
     if not example:
         return
 
-    # Create the prompt
-    prompt = EVALUATION_PROMPT_TEMPLATE.format(code=example['code'])
-
-    expected_answer = example.get('verified_answer', example.get('answer', ''))
     # If dry run, show what would be sent and exit
     if args.dry_run:
         print("\n=== DRY RUN ===")
         print(f"Provider: {args.provider}")
         print(f"Model: {args.model}")
+        print(f"Confidence strategies: {', '.join(confidence_strategies)}")
         print(f"\nExample selected:")
         print(f"Language: {example['language']}")
         print(f"Difficulty: {example['difficulty']}")
+        expected_answer = example.get('verified_answer', example.get('answer', ''))
         print(f"Expected Answer: {expected_answer}")
-        print("\nPrompt that would be sent:")
+
+        print("\nPrompts that would be sent:")
+        # Show all confidence prompts
+        for i, strategy in enumerate(confidence_strategies):
+            print(f"\n=== Confidence Prompt {i+1}: {strategy} ===")
+            print("=" * 40)
+            print(CONFIDENCE_PROMPTS[strategy]["template"].format(code=example['code']))
+            print("=" * 40)
+
+        # Show evaluation prompt
+        print("\n=== Evaluation Prompt ===")
         print("=" * 40)
-        print(prompt)
+        print(EVALUATION_PROMPT_TEMPLATE.format(code=example['code']))
         print("=" * 40)
-        print("\nNo API call will be made. Exiting.")
+
+        print("\nNo API calls will be made. Exiting.")
         return
 
-    # Query the model
-    if args.provider == 'openai':
-        response = query_openai(client, prompt, args.model)
-    else:  # anthropic
-        response = query_anthropic(client, prompt, args.model)
-
-    if not response:
-        print("No response received from the API")
+    # Evaluate the example
+    evaluation = evaluate_example(client, example, args.model, args.provider, confidence_strategies)
+    if not evaluation:
+        print("Failed to evaluate example")
         return
 
-    # Extract the answer
-    extracted_answer = extract_final_answer(response)
-
+    # Print results
     print("\nEvaluation Results:")
     print(f"Language: {example['language']}")
     print(f"Difficulty: {example['difficulty']}")
-    print(f"Expected Answer: {expected_answer}")
-    print(f"Model's Answer: {extracted_answer}")
-    print(f"Match: {extracted_answer.strip() == expected_answer.strip()}")
+    print(f"Expected Answer: {evaluation['expected_answer']}")
+    print(f"Model's Answer: {evaluation['extracted_answer']}")
+    print(f"Match: {evaluation['match']}")
+
+    # Print confidence results for each strategy
+    print("\nConfidence Estimates:")
+    for strategy in confidence_strategies:
+        confidence = evaluation["confidence_results"][strategy]["confidence"]
+        confidence_str = f"{confidence:.2f}" if confidence is not None else "Unable to extract"
+        print(f"  {strategy}: {confidence_str}")
 
     # Save to JSON
-    filename = save_evaluation_to_json(example, prompt, response, args.model, args.provider)
+    filename = save_single_evaluation_with_confidence(evaluation, args.model, args.provider)
     print(f"\nResults saved to {filename}")
 
 if __name__ == "__main__":
