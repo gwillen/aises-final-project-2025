@@ -1,0 +1,11 @@
+{
+  "examples": [
+    {
+      "language": "C",
+      "difficulty": 2,
+      "code": "int function() {\n    int a = 10;\n    int b = 15;\n    return a + b;\n}",
+      "verified_answer": "25",
+      "success": true
+    }
+  ]
+}

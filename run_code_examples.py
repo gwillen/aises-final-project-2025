@@ -307,6 +307,9 @@ def verify_example(example: Dict[str, Any]) -> Dict[str, Any]:
     """
     language = example.get("language", "").strip()
     code = example.get("code", "")
+
+    # If example was previously verified, store the previous verified answer
+    previous_verified_answer = example.get("verified_answer", None)
     original_answer = example.get("answer", "")
 
     # Run the code
@@ -321,6 +324,11 @@ def verify_example(example: Dict[str, Any]) -> Dict[str, Any]:
 
     result["verified_answer"] = output.strip() if success else f"ERROR: {error}"
     result["success"] = success
+
+    # If there was a previous verified answer, store it for comparison
+    if previous_verified_answer is not None:
+        result["previous_verified_answer"] = previous_verified_answer
+        result["answer_changed"] = previous_verified_answer != result["verified_answer"]
 
     return result
 
@@ -390,24 +398,34 @@ def print_verification_summary(examples: List[Dict[str, Any]]) -> None:
     total = len(examples)
     successful_runs = sum(1 for ex in examples if ex.get("success", False))
 
+    # Check for examples that changed from previous verification
+    changed_answers = sum(1 for ex in examples if ex.get("answer_changed", False))
+
     print(f"\nVerification Summary:")
     print(f"Total examples: {total}")
     print(f"Successfully ran: {successful_runs} ({successful_runs/total*100:.1f}%)")
+
+    if changed_answers > 0:
+        print(f"Changed answers: {changed_answers}")
 
     # Group by language
     by_language = {}
     for ex in examples:
         lang = ex.get("language", "Unknown").lower()
         if lang not in by_language:
-            by_language[lang] = {"total": 0, "success": 0}
+            by_language[lang] = {"total": 0, "success": 0, "changed": 0}
 
         by_language[lang]["total"] += 1
         if ex.get("success", False):
             by_language[lang]["success"] += 1
+        if ex.get("answer_changed", False):
+            by_language[lang]["changed"] += 1
 
     print("\nBy Language:")
     for lang, stats in by_language.items():
         print(f"  {lang.capitalize()}: {stats['success']}/{stats['total']} successful runs ({stats['success']/stats['total']*100:.1f}%)")
+        if stats['changed'] > 0:
+            print(f"    Changed answers: {stats['changed']}")
 
 def main():
     """Main function to parse arguments and execute verification."""
@@ -420,6 +438,8 @@ def main():
                         help='Show detailed output for each example')
     parser.add_argument('--debug', action='store_true',
                         help='Show additional debug information for code execution')
+    parser.add_argument('--skip-verified', action='store_true',
+                        help='Skip examples that already have a verified_answer')
 
     args = parser.parse_args()
 
@@ -437,6 +457,14 @@ def main():
             return
         examples = filtered_examples
 
+    # Filter out already verified examples if requested
+    if args.skip_verified:
+        original_count = len(examples)
+        examples = [ex for ex in examples if "verified_answer" not in ex]
+        skipped_count = original_count - len(examples)
+        if skipped_count > 0:
+            print(f"Skipping {skipped_count} already verified examples")
+
     print(f"Verifying {len(examples)} examples...")
 
     # Create debug logger if requested
@@ -449,7 +477,10 @@ def main():
         language = example.get("language", "Unknown")
         difficulty = example.get("difficulty", "?")
         code = example.get("code", "")
+
+        # Check for existing answer, either verified or original
         original_answer = example.get("answer", "")
+        previous_verified = example.get("verified_answer", None)
 
         print(f"[{i}/{len(examples)}] Verifying {language} example (difficulty {difficulty})...", end="")
 
@@ -476,7 +507,14 @@ def main():
         if args.verbose or not verified["success"]:
             if not verified["success"]:
                 print(f"  Error: {verified['verified_answer']}")
-            print(f"  Original answer: {original_answer}")
+
+            if previous_verified is not None:
+                print(f"  Previous verified answer: {previous_verified}")
+                if verified.get("answer_changed", False):
+                    print(f"  NOTICE: Answer has changed from previous verification!")
+            elif original_answer:
+                print(f"  Original answer: {original_answer}")
+
             print(f"  Actual output: {verified['verified_answer'] if verified['success'] else 'ERROR'}")
             print()
 
