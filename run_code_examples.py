@@ -297,29 +297,30 @@ def run_code(code: str, language: str) -> Tuple[bool, str, str]:
 
 def verify_example(example: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Verify an example by running the code and comparing the output with the expected answer.
+    Verify an example by running the code and getting the actual result.
 
     Args:
         example: The example to verify
 
     Returns:
-        The example with verification results
+        The example with verified answer
     """
     language = example.get("language", "").strip()
     code = example.get("code", "")
-    expected_answer = example.get("answer", "")
+    original_answer = example.get("answer", "")
 
     # Run the code
     success, output, error = run_code(code, language)
 
-    # Add verification results to the example
+    # Create a new example with the verified answer
     result = example.copy()
-    result["verification"] = {
-        "success": success,
-        "output": output,
-        "error": error,
-        "matches_expected": success and output.strip() == expected_answer.strip()
-    }
+
+    # Remove the original answer and add the verified answer
+    if "answer" in result:
+        del result["answer"]
+
+    result["verified_answer"] = output.strip() if success else f"ERROR: {error}"
+    result["success"] = success
 
     return result
 
@@ -351,7 +352,7 @@ def save_verification_results(examples: List[Dict[str, Any]], original_file: str
     Save verification results to a JSON file.
 
     Args:
-        examples: The examples with verification results
+        examples: The examples with verified answers
         original_file: The original file path
 
     Returns:
@@ -384,33 +385,29 @@ def print_verification_summary(examples: List[Dict[str, Any]]) -> None:
     Print a summary of verification results.
 
     Args:
-        examples: The examples with verification results
+        examples: The examples with verified answers
     """
     total = len(examples)
-    successful_runs = sum(1 for ex in examples if ex.get("verification", {}).get("success", False))
-    matching_answers = sum(1 for ex in examples if ex.get("verification", {}).get("matches_expected", False))
+    successful_runs = sum(1 for ex in examples if ex.get("success", False))
 
     print(f"\nVerification Summary:")
     print(f"Total examples: {total}")
     print(f"Successfully ran: {successful_runs} ({successful_runs/total*100:.1f}%)")
-    print(f"Matching expected answers: {matching_answers} ({matching_answers/total*100:.1f}%)")
 
     # Group by language
     by_language = {}
     for ex in examples:
         lang = ex.get("language", "Unknown").lower()
         if lang not in by_language:
-            by_language[lang] = {"total": 0, "success": 0, "match": 0}
+            by_language[lang] = {"total": 0, "success": 0}
 
         by_language[lang]["total"] += 1
-        if ex.get("verification", {}).get("success", False):
+        if ex.get("success", False):
             by_language[lang]["success"] += 1
-        if ex.get("verification", {}).get("matches_expected", False):
-            by_language[lang]["match"] += 1
 
     print("\nBy Language:")
     for lang, stats in by_language.items():
-        print(f"  {lang.capitalize()}: {stats['match']}/{stats['total']} correct answers ({stats['match']/stats['total']*100:.1f}%)")
+        print(f"  {lang.capitalize()}: {stats['success']}/{stats['total']} successful runs ({stats['success']/stats['total']*100:.1f}%)")
 
 def main():
     """Main function to parse arguments and execute verification."""
@@ -452,6 +449,7 @@ def main():
         language = example.get("language", "Unknown")
         difficulty = example.get("difficulty", "?")
         code = example.get("code", "")
+        original_answer = example.get("answer", "")
 
         print(f"[{i}/{len(examples)}] Verifying {language} example (difficulty {difficulty})...", end="")
 
@@ -468,21 +466,18 @@ def main():
         verified = verify_example(example)
         verified_examples.append(verified)
 
-        if verified["verification"]["success"]:
-            if verified["verification"]["matches_expected"]:
-                result = "✓ CORRECT"
-            else:
-                result = "✗ WRONG ANSWER"
+        if verified["success"]:
+            result = "✓ SUCCESS"
         else:
             result = "✗ ERROR"
 
         print(f" {result}")
 
-        if args.verbose or not verified["verification"]["success"]:
-            if verified["verification"]["error"]:
-                print(f"  Error: {verified['verification']['error']}")
-            print(f"  Expected: {verified['answer']}")
-            print(f"  Actual: {verified['verification']['output']}")
+        if args.verbose or not verified["success"]:
+            if not verified["success"]:
+                print(f"  Error: {verified['verified_answer']}")
+            print(f"  Original answer: {original_answer}")
+            print(f"  Actual output: {verified['verified_answer'] if verified['success'] else 'ERROR'}")
             print()
 
     # Save verification results
