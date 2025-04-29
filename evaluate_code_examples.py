@@ -14,6 +14,7 @@ import json
 import argparse
 import random
 import sys
+import re
 from datetime import datetime
 from typing import Dict, List, Optional, Any, Tuple
 
@@ -31,6 +32,14 @@ from ai_utils import (
 
 EVALUATION_PROMPT_TEMPLATE = """
 What does this program output? Please provide only your best immediate guess at the final answer, on a line by itself; no reasoning, analysis, or commentary.
+
+```
+{code}
+```
+"""
+
+CONFIDENCE_PROMPT_TEMPLATE = """
+In a moment, I will ask you what this program outputs. You will have to provide only your best immediate guess at the final answer, without reasoning, analysis, or commentary. Before I do that, first I want to evaluate your confidence that you can answer correctly. Please give me an estimate of your probability that your answer will be correct. Again, please give only the estimate, on a line by itself, without reasoning, analysis, or commentary.
 
 ```
 {code}
@@ -120,6 +129,70 @@ def extract_final_answer(response: str) -> str:
 
     return response.strip()
 
+# TODO: check how actual models format their responses, and try to coach them to use a standardized format.
+def extract_confidence(response: str) -> float:
+    """
+    Extract the confidence estimate from the response.
+
+    Args:
+        response: The full response from the AI
+
+    Returns:
+        The extracted confidence as a float between 0 and 1
+    """
+    # Look for percentage or decimal value
+    response = response.strip()
+
+    # First look for a line with just a number
+    for line in response.split('\n'):
+        line = line.strip()
+        if not line:
+            continue
+
+        # Try to extract a percentage or decimal
+        # Check for percentage format (e.g., "90%" or "90 percent")
+        percentage_match = re.search(r'(\d+)(?:\s*%|\s+percent)', line)
+        if percentage_match:
+            try:
+                percentage = float(percentage_match.group(1))
+                return percentage / 100.0  # Convert to decimal
+            except ValueError:
+                pass
+
+        # Check for decimal format (e.g., "0.9" or ".9")
+        decimal_match = re.search(r'(\d*\.\d+|\d+\.\d*)', line)
+        if decimal_match:
+            try:
+                return float(decimal_match.group(1))
+            except ValueError:
+                pass
+
+        # Check for fraction format (e.g., "9/10")
+        fraction_match = re.search(r'(\d+)\s*/\s*(\d+)', line)
+        if fraction_match:
+            try:
+                numerator = float(fraction_match.group(1))
+                denominator = float(fraction_match.group(2))
+                if denominator != 0:
+                    return numerator / denominator
+            except ValueError:
+                pass
+
+    # If we couldn't find a specific format, try to extract the first number
+    number_match = re.search(r'(\d+)', response)
+    if number_match:
+        try:
+            number = float(number_match.group(1))
+            # If it's greater than 1, assume it's a percentage
+            if number > 1:
+                return number / 100.0
+            return number
+        except ValueError:
+            pass
+
+    # Default to None if we couldn't extract anything
+    return None
+
 def save_evaluation_to_json(example: Dict[str, Any], prompt: str, response: str,
                            model_name: str, provider: str) -> str:
     """
@@ -173,6 +246,17 @@ def save_multiple_evaluations_to_json(evaluations: List[Dict[str, Any]], model_n
     matches = sum(1 for eval in evaluations if eval.get("match", False))
     match_rate = (matches / total) * 100 if total > 0 else 0
 
+    # Calculate confidence statistics
+    avg_confidence = sum(eval.get("confidence") for eval in evaluations if "confidence" in eval) / total if total > 0 else None
+    missing_confidence = sum(1 for eval in evaluations if "confidence" not in eval)
+
+    # Calculate calibration: how well confidence predicts correctness
+    correct_confidences = [eval.get("confidence") for eval in evaluations if "confidence" in eval and eval.get("match", False)]
+    incorrect_confidences = [eval.get("confidence") for eval in evaluations if "confidence" in eval and not eval.get("match", False) and "match" in eval]
+
+    avg_confidence_when_correct = sum(correct_confidences) / len(correct_confidences) if correct_confidences else 0
+    avg_confidence_when_incorrect = sum(incorrect_confidences) / len(incorrect_confidences) if incorrect_confidences else 0
+
     # Group by language and difficulty
     by_language = {}
     by_difficulty = {}
@@ -186,10 +270,15 @@ def save_multiple_evaluations_to_json(evaluations: List[Dict[str, Any]], model_n
             by_language[lang] = {
                 "total": 0,
                 "matches": 0,
-                "by_difficulty": {}
+                "by_difficulty": {},
+                "avg_confidence": 0,
+                "total_confidence": 0,
+                "missing_confidence": 0
             }
 
         by_language[lang]["total"] += 1
+        by_language[lang]["total_confidence"] += eval.get("confidence", 0)
+        by_language[lang]["missing_confidence"] += 1 if "confidence" not in eval else 0
         if eval.get("match", False):
             by_language[lang]["matches"] += 1
 
@@ -197,22 +286,45 @@ def save_multiple_evaluations_to_json(evaluations: List[Dict[str, Any]], model_n
         if difficulty not in by_language[lang]["by_difficulty"]:
             by_language[lang]["by_difficulty"][difficulty] = {
                 "total": 0,
-                "matches": 0
+                "matches": 0,
+                "total_confidence": 0,
+                "avg_confidence": 0,
+                "missing_confidence": 0
             }
 
         by_language[lang]["by_difficulty"][difficulty]["total"] += 1
+        by_language[lang]["by_difficulty"][difficulty]["total_confidence"] += eval.get("confidence", 0)
+        by_language[lang]["by_difficulty"][difficulty]["missing_confidence"] += 1 if "confidence" not in eval else 0
+
         if eval.get("match", False):
             by_language[lang]["by_difficulty"][difficulty]["matches"] += 1
 
         if difficulty not in by_difficulty:
             by_difficulty[difficulty] = {
                 "total": 0,
-                "matches": 0
+                "matches": 0,
+                "total_confidence": 0,
+                "avg_confidence": 0,
+                "missing_confidence": 0
             }
 
         by_difficulty[difficulty]["total"] += 1
+        by_difficulty[difficulty]["total_confidence"] += eval.get("confidence", 0)
+        by_difficulty[difficulty]["missing_confidence"] += 1 if "confidence" not in eval else 0
+
         if eval.get("match", False):
             by_difficulty[difficulty]["matches"] += 1
+
+    # Calculate average confidence for each category
+    for lang in by_language:
+        by_language[lang]["avg_confidence"] = by_language[lang]["total_confidence"] / (by_language[lang]["total"] - by_language[lang]["missing_confidence"]) if by_language[lang]["total"] > 0 else 0
+
+        for diff in by_language[lang]["by_difficulty"]:
+            diff_data = by_language[lang]["by_difficulty"][diff]
+            diff_data["avg_confidence"] = diff_data["total_confidence"] / (diff_data["total"] - diff_data["missing_confidence"]) if diff_data["total"] > 0 else 0
+
+    for diff in by_difficulty:
+        by_difficulty[diff]["avg_confidence"] = by_difficulty[diff]["total_confidence"] / (by_difficulty[diff]["total"] - by_difficulty[diff]["missing_confidence"]) if by_difficulty[diff]["total"] > 0 else 0
 
     data = {
         "timestamp": timestamp,
@@ -221,7 +333,12 @@ def save_multiple_evaluations_to_json(evaluations: List[Dict[str, Any]], model_n
         "total_examples": total,
         "total_matches": matches,
         "match_rate": f"{match_rate:.2f}%",
+        "avg_confidence": avg_confidence,
+        "avg_confidence_when_correct": avg_confidence_when_correct,
+        "avg_confidence_when_incorrect": avg_confidence_when_incorrect,
+        "missing_confidence": missing_confidence,
         "by_language": by_language,
+        "by_difficulty": by_difficulty,
         "evaluations": evaluations
     }
 
@@ -242,10 +359,21 @@ def evaluate_example(client, example: Dict[str, Any], model_name: str, provider:
     Returns:
         A dictionary with the evaluation results
     """
-    # Create the prompt
+    # First, get confidence estimate
+    confidence_prompt = CONFIDENCE_PROMPT_TEMPLATE.format(code=example['code'])
+
+    if provider == 'openai':
+        confidence_response = query_openai(client, confidence_prompt, model_name)
+    else:  # anthropic
+        confidence_response = query_anthropic(client, confidence_prompt, model_name)
+
+    confidence = None
+    if confidence_response:
+        confidence = extract_confidence(confidence_response)
+
+    # Then, evaluate the example
     prompt = EVALUATION_PROMPT_TEMPLATE.format(code=example['code'])
 
-    # Query the model
     if provider == 'openai':
         response = query_openai(client, prompt, model_name)
     else:  # anthropic
@@ -263,6 +391,9 @@ def evaluate_example(client, example: Dict[str, Any], model_name: str, provider:
     return {
         "example": example,
         "prompt": prompt,
+        "confidence_prompt": confidence_prompt,
+        "confidence_response": confidence_response,
+        "confidence": confidence,
         "full_response": response,
         "extracted_answer": extracted_answer,
         "expected_answer": expected_answer,
@@ -343,12 +474,13 @@ def main():
             print(f"Provider: {args.provider}")
             print(f"Model: {args.model}")
             print(f"\nWould evaluate {len(examples)} examples.")
-            print("No API calls will be made. Exiting.")
+            print("No API call will be made. Exiting.")
             return
 
         print(f"Running evaluation on {len(examples)} examples. This may take a while...")
         evaluations = []
         correct_count = 0
+        total_confidence = 0
 
         for i, example in enumerate(examples, 1):
             print(f"[{i}/{len(examples)}] Evaluating {example['language']} example (difficulty {example.get('difficulty', '?')})...", end="", flush=True)
@@ -356,13 +488,16 @@ def main():
             evaluation = evaluate_example(client, example, args.model, args.provider)
             if evaluation:
                 evaluations.append(evaluation)
+                confidence = evaluation.get("confidence", 0)
+                total_confidence += confidence
+
                 if evaluation["match"]:
                     result = "✓ CORRECT"
                     correct_count += 1
                 else:
                     result = "✗ WRONG"
 
-                print(f" {result}")
+                print(f" {result} (confidence: {confidence:.2f})")
                 print(f"  Expected: {evaluation['expected_answer']}")
                 print(f"  Model's answer: {evaluation['extracted_answer']}")
             else:
@@ -373,9 +508,12 @@ def main():
 
         # Print summary
         match_rate = (correct_count / len(evaluations)) * 100 if evaluations else 0
+        avg_confidence = total_confidence / len(evaluations) if evaluations else 0
+
         print("\n=== Evaluation Summary ===")
         print(f"Total examples: {len(evaluations)}")
         print(f"Correct answers: {correct_count} ({match_rate:.2f}%)")
+        print(f"Average confidence: {avg_confidence:.2f}")
         print(f"Results saved to {filename}")
         return
 
