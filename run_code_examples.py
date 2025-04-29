@@ -396,6 +396,11 @@ def print_verification_summary(examples: List[Dict[str, Any]]) -> None:
         examples: The examples with verified answers
     """
     total = len(examples)
+
+    if total == 0:
+        print("No examples to verify.")
+        return
+
     successful_runs = sum(1 for ex in examples if ex.get("success", False))
 
     # Check for examples that changed from previous verification
@@ -464,6 +469,10 @@ def main():
         skipped_count = original_count - len(examples)
         if skipped_count > 0:
             print(f"Skipping {skipped_count} already verified examples")
+
+    if not examples:
+        print("No examples to verify.")
+        return
 
     print(f"Verifying {len(examples)} examples...")
 
