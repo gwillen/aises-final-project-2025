@@ -129,7 +129,12 @@ def _extract_standard_response_message(response: Optional[APIResponse], client: 
         return None
 
 # --- Unified Query Function with History (Refactored) ---
-def query_model_with_history(client: APIClient, model_name: str, conversation: StandardConversation) -> Optional[StandardMessage]:
+def query_model_with_history(
+    client: APIClient,
+    model_name: str,
+    conversation: StandardConversation,
+    temperature: Optional[float] = 0.7
+) -> StandardConversation:
     """
     Query the specified AI model provider with a given conversation history.
     Appends the assistant's response to the conversation if successful.
@@ -139,6 +144,7 @@ def query_model_with_history(client: APIClient, model_name: str, conversation: S
         client: The API client (OpenAI or Anthropic).
         model_name: The name of the model to use.
         conversation: A list of StandardMessage dictionaries representing the history.
+        temperature: The sampling temperature (default: 0.7).
 
     Returns:
         The updated StandardConversation list including the assistant's response,
@@ -152,7 +158,7 @@ def query_model_with_history(client: APIClient, model_name: str, conversation: S
             raw_response = client.chat.completions.create(
                 model=model_name,
                 messages=openai_messages,
-                temperature=0.7, # Keep temperature consistent
+                temperature=temperature,
             )
         elif isinstance(client, Anthropic):
             system_prompt, anthropic_messages = _convert_standard_to_anthropic_format(conversation)
@@ -160,7 +166,7 @@ def query_model_with_history(client: APIClient, model_name: str, conversation: S
             create_params = {
                 "model": model_name,
                 "max_tokens": 1024, # Keep consistent
-                "temperature": 0.7, # Keep consistent
+                "temperature": temperature,
                 "messages": anthropic_messages
             }
             if system_prompt:
@@ -188,8 +194,12 @@ def query_model_with_history(client: APIClient, model_name: str, conversation: S
         return conversation # Return original conversation on API error
 
 # --- Unified Query Function (Refactored) ---
-
-def query_model(client: APIClient, prompt: str, model_name: str) -> str:
+def query_model(
+    client: APIClient,
+    prompt: str,
+    model_name: str,
+    temperature: Optional[float] = 0.7
+) -> str:
     """
     Query the specified AI model provider with a single user prompt.
     (Calls the history-based function internally).
@@ -198,6 +208,7 @@ def query_model(client: APIClient, prompt: str, model_name: str) -> str:
         client: The API client (OpenAI or Anthropic).
         prompt: The prompt to send.
         model_name: The name of the model to use.
+        temperature: The sampling temperature (default: 0.7).
 
     Returns:
         The response text, or an empty string if an error occurs.
@@ -205,7 +216,10 @@ def query_model(client: APIClient, prompt: str, model_name: str) -> str:
     # Construct minimal conversation
     initial_conversation: StandardConversation = [{"role": "user", "content": prompt}]
     # Pass a copy in case the list is reused elsewhere, although unlikely here
-    updated_conversation = query_model_with_history(client, model_name, initial_conversation[:])
+    # Pass temperature down
+    updated_conversation = query_model_with_history(
+        client, model_name, initial_conversation[:], temperature=temperature
+    )
 
     # Check if the conversation was actually updated (i.e., API call succeeded)
     # and the last message is from the assistant
