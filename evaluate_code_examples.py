@@ -23,7 +23,6 @@ from ai_utils import (
     create_client,
     query_model,
     list_models,
-    validate_model_name,
     save_to_json
 )
 
@@ -35,48 +34,54 @@ What does this program output? Please provide only your best immediate guess at 
 ```
 """
 
-# Confidence prompt strategies
-CONFIDENCE_PROMPTS = {
+# --- Confidence Prompt Components ---
+PROMPT_COMMON_SUFFIX = "Again, please give only the estimate, on a line by itself, without reasoning, analysis, or commentary."
+PROMPT_CODE_BLOCK = "```\n{code}\n```"
+
+PROMPT_BEFORE_PREFIX = "In a moment, I will ask you what this program outputs. You will have to provide only your best immediate guess at the final answer, without reasoning, analysis, or commentary. Before I do that, first I want to evaluate your confidence that you can answer correctly."
+# Slightly rephrased for better assembly
+PROMPT_AFTER_PREFIX = "You just gave an answer for the program output. Now, please give me an estimate of your probability that your answer is correct."
+
+PROMPT_STRATEGY_REQUESTS = {
+    "standard": "Please give me an estimate of your probability that your answer will be correct.",
+    "inverse": "Please give me an estimate of the probability p that your answer is correct, written as 1/p: the number of similar examples you would expect to solve, in order to get one wrong, on average."
+}
+# --- End Prompt Components ---
+
+
+# Confidence prompt strategy definitions (excluding templates)
+CONFIDENCE_STRATEGY_DEFINITIONS = {
     "standard": {
         "description": "Standard probability estimation (0-100% or 0-1)",
-        "before_template": """
-In a moment, I will ask you what this program outputs. You will have to provide only your best immediate guess at the final answer, without reasoning, analysis, or commentary. Before I do that, first I want to evaluate your confidence that you can answer correctly. Please give me an estimate of your probability that your answer will be correct. Again, please give only the estimate, on a line by itself, without reasoning, analysis, or commentary.
-
-```
-{code}
-```
-""",
-        "after_template": """
-You just gave an answer for the program output. Now, please give me an estimate of your probability that your answer is correct. Again, please give only the estimate, on a line by itself, without reasoning, analysis, or commentary.
-
-```
-{code}
-```
-""",
         "extract_func": "extract_standard_confidence"
     },
     "inverse": {
         "description": "Ask for 1/p formulation: number of examples to get one wrong",
-        "before_template": """
-In a moment, I will ask you what this program outputs. You will have to provide only your best immediate guess at the final answer, without reasoning, analysis, or commentary. Before I do that, first I want to evaluate your confidence that you can answer correctly. Please give me an estimate of the probability p that your answer is correct, written as 1/p: the number of similar examples you would expect to solve, in order to get one wrong, on average. Again, please give only the estimate, on a line by itself, without reasoning, analysis, or commentary.
-
-```
-{code}
-```
-""",
-        "after_template": """
-You just gave an answer for the program output. Now, please give me an estimate of the probability p that your answer is correct, written as 1/p: the number of similar examples you would expect to solve, in order to get one wrong, on average. Again, please give only the estimate, on a line by itself, without reasoning, analysis, or commentary.
-
-```
-{code}
-```
-""",
         "extract_func": "extract_inverse_confidence"
     }
 }
 
 # Default confidence prompt strategy
 DEFAULT_CONFIDENCE_STRATEGY = "standard"
+
+def get_confidence_prompt(strategy: str, time_point: str, code: str) -> str:
+    """
+    Constructs the confidence prompt based on strategy, time point, and code.
+
+    Args:
+        strategy: The confidence strategy ('standard', 'inverse').
+        time_point: 'before' or 'after'.
+        code: The code snippet for the prompt.
+
+    Returns:
+        The fully constructed prompt string.
+    """
+    prefix = PROMPT_BEFORE_PREFIX if time_point == "before" else PROMPT_AFTER_PREFIX
+    strategy_request = PROMPT_STRATEGY_REQUESTS[strategy]
+
+    # Assemble the prompt parts
+    prompt = f"{prefix} {strategy_request} {PROMPT_COMMON_SUFFIX}\n\n{PROMPT_CODE_BLOCK.format(code=code)}"
+    return prompt.strip()
 
 def load_examples_from_json(file_path: str) -> List[Dict[str, Any]]:
     """
@@ -289,7 +294,7 @@ def extract_inverse_confidence(response: str) -> float:
     # Default to None if we couldn't extract anything
     return None
 
-def extract_confidence(response: str, strategy: str = DEFAULT_CONFIDENCE_STRATEGY) -> float:
+def extract_confidence(response: str, strategy: str) -> float:
     """
     Extract the confidence estimate from the response using the specified strategy.
 
@@ -300,10 +305,7 @@ def extract_confidence(response: str, strategy: str = DEFAULT_CONFIDENCE_STRATEG
     Returns:
         The extracted confidence as a float between 0 and 1, or None if extraction fails
     """
-    if strategy not in CONFIDENCE_PROMPTS:
-        strategy = DEFAULT_CONFIDENCE_STRATEGY
-
-    extract_func_name = CONFIDENCE_PROMPTS[strategy]["extract_func"]
+    extract_func_name = CONFIDENCE_STRATEGY_DEFINITIONS[strategy]["extract_func"]
 
     # Call the appropriate extraction function
     if extract_func_name == "extract_standard_confidence":
@@ -311,7 +313,7 @@ def extract_confidence(response: str, strategy: str = DEFAULT_CONFIDENCE_STRATEG
     elif extract_func_name == "extract_inverse_confidence":
         return extract_inverse_confidence(response)
     else:
-        return extract_standard_confidence(response)  # Fallback to standard
+        raise ValueError(f"Unknown confidence extraction strategy: {strategy}")
 
 def save_single_evaluation_with_confidence(evaluation: Dict[str, Any], model_name: str, provider: str) -> str:
     # This function is now deprecated, save_multiple_evaluations_to_json handles single cases.
@@ -564,22 +566,13 @@ def evaluate_example(client, example: Dict[str, Any], model_name: str, provider:
     Returns:
         A dictionary with the evaluation results
     """
-    # Use default confidence strategy if none specified
-    if not confidence_strategies:
-        confidence_strategies = [DEFAULT_CONFIDENCE_STRATEGY]
-
-    # Make sure all strategies are valid
-    confidence_strategies = [s for s in confidence_strategies if s in CONFIDENCE_PROMPTS]
-    if not confidence_strategies:
-        confidence_strategies = [DEFAULT_CONFIDENCE_STRATEGY]
-
     # Dictionary to hold confidence results
     confidence_results = {}
 
     # Evaluate "before" confidence for each strategy
     for strategy in confidence_strategies:
         # Get the prompt template for this strategy
-        confidence_prompt = CONFIDENCE_PROMPTS[strategy]["before_template"].format(code=example['code'])
+        confidence_prompt = get_confidence_prompt(strategy, "before", example['code'])
 
         # Query the model
         confidence_response = query_model(client, confidence_prompt, model_name)
@@ -615,7 +608,7 @@ def evaluate_example(client, example: Dict[str, Any], model_name: str, provider:
     # Evaluate "after" confidence for each strategy now that we have the answer
     for strategy in confidence_strategies:
         # Get the prompt template for this strategy
-        confidence_prompt = CONFIDENCE_PROMPTS[strategy]["after_template"].format(code=example['code'])
+        confidence_prompt = get_confidence_prompt(strategy, "after", example['code'])
 
         # Query the model
         confidence_response = query_model(client, confidence_prompt, model_name)
@@ -668,7 +661,7 @@ def main():
     parser.add_argument('--run-all', action='store_true',
                         help='Run evaluation on all examples in the input file')
     parser.add_argument('--confidence-strategies', type=str, default=DEFAULT_CONFIDENCE_STRATEGY,
-                        help=f'Comma-separated list of confidence strategies to use. Available: {", ".join(CONFIDENCE_PROMPTS.keys())}')
+                        help=f'Comma-separated list of confidence strategies to use. Available: {", ".join(CONFIDENCE_STRATEGY_DEFINITIONS.keys())}')
     parser.add_argument('--list-confidence-strategies', action='store_true',
                         help='List available confidence strategies and exit')
 
@@ -677,7 +670,7 @@ def main():
     # List confidence strategies if requested
     if args.list_confidence_strategies:
         print("Available confidence estimation strategies:")
-        for strategy, details in CONFIDENCE_PROMPTS.items():
+        for strategy, details in CONFIDENCE_STRATEGY_DEFINITIONS.items():
             print(f"  - {strategy}: {details['description']}")
         return
 
@@ -696,19 +689,12 @@ def main():
         parser.print_help()
         return
 
-    # Validate model name
-    if not validate_model_name(args.provider, args.model):
-        print(f"Warning: '{args.model}' doesn't look like a standard {args.provider} model name.")
-        confirmation = input("Continue anyway? (y/n): ")
-        if confirmation.lower() != 'y':
-            return
-
     # Parse confidence strategies
     confidence_strategies = [s.strip() for s in args.confidence_strategies.split(",")]
-    invalid_strategies = [s for s in confidence_strategies if s not in CONFIDENCE_PROMPTS]
+    invalid_strategies = [s for s in confidence_strategies if s not in CONFIDENCE_STRATEGY_DEFINITIONS]
     if invalid_strategies:
         print(f"Warning: Unknown confidence strategies: {', '.join(invalid_strategies)}")
-        print(f"Available strategies: {', '.join(CONFIDENCE_PROMPTS.keys())}")
+        print(f"Available strategies: {', '.join(CONFIDENCE_STRATEGY_DEFINITIONS.keys())}")
         print(f"Using default strategy: {DEFAULT_CONFIDENCE_STRATEGY}")
         confidence_strategies = [DEFAULT_CONFIDENCE_STRATEGY]
 
@@ -768,7 +754,7 @@ def main():
         for i, strategy in enumerate(confidence_strategies):
             print(f"\n=== Confidence Prompt {i+1}: {strategy} (Before Answer) ===")
             print("=" * 40)
-            print(CONFIDENCE_PROMPTS[strategy]["before_template"].format(code=first_example['code']))
+            print(get_confidence_prompt(strategy, "before", first_example['code']))
             print("=" * 40)
 
         # Show evaluation prompt
@@ -781,7 +767,7 @@ def main():
         for i, strategy in enumerate(confidence_strategies):
             print(f"\n=== Confidence Prompt {i+1}: {strategy} (After Answer) ===")
             print("=" * 40)
-            print(CONFIDENCE_PROMPTS[strategy]["after_template"].format(code=first_example['code']))
+            print(get_confidence_prompt(strategy, "after", first_example['code']))
             print("=" * 40)
 
         print(f"\nWould evaluate {len(examples_to_run)} example(s) in total.")
