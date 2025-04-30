@@ -221,30 +221,6 @@ def list_anthropic_models(client: Anthropic) -> None:
     except Exception as e:
         print(f"Error displaying Anthropic models: {e}")
 
-# --- Model Validation ---
-
-def validate_model_name(provider: str, model_name: str) -> bool:
-    """
-    Basic validation of model names for each provider.
-
-    Args:
-        provider: The API provider (openai or anthropic)
-        model_name: The name of the model
-
-    Returns:
-        True if the model name seems valid, False otherwise
-    """
-    if provider == PROVIDER_OPENAI:
-        # Updated to be slightly more general, allows for fine-tuned models etc.
-        # Basic check: model name shouldn't be empty and might contain ':' or '-'
-        return bool(model_name and (':' in model_name or '-' in model_name or 'gpt' in model_name.lower()))
-    elif provider == PROVIDER_ANTHROPIC:
-        valid_prefixes = ['claude-']
-        return any(model_name.startswith(prefix) for prefix in valid_prefixes)
-    return False
-
-# --- JSON Saving ---
-
 def save_to_json(data: Dict[str, Any], filename_prefix: str, output_dir: str = None) -> str:
     """
     Save data to a timestamped JSON file in the specified directory.
