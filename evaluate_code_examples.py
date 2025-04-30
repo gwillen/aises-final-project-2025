@@ -53,8 +53,8 @@ PROMPT_STRATEGY_REQUESTS = {
     "inverse": "Please give me an estimate of the number of similar problems " \
         "you would expect to attempt, on average, before getting one wrong. " \
         "(This equals 1/(1-p), where p is the probability of success.)",
-    "verbal": "Please give me a verbal estimate of how confident you are " \
-        "that your answer is correct."
+    "verbal": "Please describe in words how confident you are that your " \
+        "answer is correct."
 }
 # --- End Prompt Components ---
 
