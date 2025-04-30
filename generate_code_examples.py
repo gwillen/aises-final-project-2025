@@ -33,7 +33,7 @@ Please provide the programs in the following format, with a blank line between c
 LANGUAGE: [the language, C or Python or Javascript]
 DIFFICULTY: [a number from 1 to 10]
 CODE:
-[write the code as a function, which takes no arguments, and which returns a final answer that the interviewee should figure out.]
+[write the code as a function named "f", which takes no arguments, and which returns a final answer that the interviewee should figure out.]
 ANSWER: [your own best guess at the answer; it does not need to be correct]
 """
 
