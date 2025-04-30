@@ -314,32 +314,160 @@ def extract_confidence(response: str, strategy: str = DEFAULT_CONFIDENCE_STRATEG
         return extract_standard_confidence(response)  # Fallback to standard
 
 def save_single_evaluation_with_confidence(evaluation: Dict[str, Any], model_name: str, provider: str) -> str:
+    # This function is now deprecated, save_multiple_evaluations_to_json handles single cases.
+    raise DeprecationWarning("save_single_evaluation_with_confidence is deprecated. Use save_multiple_evaluations_to_json.")
+
+# --- Helper Functions for Statistics ---
+
+TIME_POINTS = ["before", "after"]
+
+def _initialize_stats_block(strategies: List[str]) -> Dict[str, Any]:
     """
-    Save a single evaluation with confidence data to a JSON file.
+    Initializes a dictionary structure for tracking evaluation statistics.
 
     Args:
-        evaluation: The evaluation result including confidence data
-        model_name: The name of the model used
-        provider: The API provider (OpenAI or Anthropic)
+        strategies: List of confidence strategy names.
 
     Returns:
-        The path to the saved JSON file
+        A dictionary initialized with zeros and empty lists for statistics.
     """
-    data = {
-        "timestamp": datetime.now().strftime("%Y%m%d_%H%M%S"),
-        "provider": provider,
-        "model": model_name,
-        "confidence_strategies": evaluation.get("confidence_strategies", []),
-        **evaluation
+    stats_block = {
+        "total": 0,
+        "matches": 0,
+        "match_rate": None,  # Calculated later
+        "by_confidence_strategy": {},
+        "confidence_stats": {} # Final calculated confidence averages/stats
     }
+    for strategy in strategies:
+        # --- Aggregation Structure ---
+        stats_block["by_confidence_strategy"][strategy] = {
+            # Nested dict for before/after time points
+            time_point: {
+                "total_confidence": 0.0, "valid_count": 0,
+                "correct_confidences": [], "incorrect_confidences": []
+            } for time_point in TIME_POINTS
+        }
+        # Add structure for confidence changes (involves both time points)
+        strategy_agg = stats_block["by_confidence_strategy"][strategy]
+        strategy_agg["confidence_changes"] = []
+        strategy_agg["correct_confidence_changes"] = []
+        strategy_agg["incorrect_confidence_changes"] = []
+        strategy_agg["confidence_changes_by_result"] = {"increased": 0, "decreased": 0, "unchanged": 0}
 
-    # Save to the output/evals directory
-    output_dir = "output/evals"
-    return save_to_json(data, f"evaluation_with_confidence_{provider}_{model_name.replace('-', '_')}", output_dir)
+        # --- Final Calculated Stats Structure ---
+        stats_block["confidence_stats"][strategy] = {
+            time_point: {
+                "avg_confidence": None,
+                "avg_confidence_when_correct": None,
+                "avg_confidence_when_incorrect": None,
+            } for time_point in TIME_POINTS
+        }
+        # Add structure for calculated change stats
+        strategy_calc = stats_block["confidence_stats"][strategy]
+        strategy_calc["avg_confidence_change"] = None
+        strategy_calc["avg_confidence_change_when_correct"] = None
+        strategy_calc["avg_confidence_change_when_incorrect"] = None
+        strategy_calc["confidence_changes_by_result"] = {"increased": 0, "decreased": 0, "unchanged": 0}
+
+    return stats_block
+
+def _update_stats_block(stats_block: Dict[str, Any], evaluation: Dict[str, Any], strategies: List[str]) -> None:
+    """
+    Updates a statistics block based on a single evaluation result.
+
+    Args:
+        stats_block: The statistics block dictionary to update.
+        evaluation: The evaluation result dictionary.
+        strategies: List of confidence strategy names.
+    """
+    stats_block["total"] += 1
+    is_match = evaluation.get("match", False)
+    if is_match:
+        stats_block["matches"] += 1
+
+    confidence_results = evaluation.get("confidence_results", {})
+    for strategy in strategies:
+        if strategy in confidence_results:
+            strategy_agg = stats_block["by_confidence_strategy"][strategy]
+            result_data = confidence_results[strategy]
+
+            # Update before/after stats
+            for time_point in TIME_POINTS:
+                confidence_key = f"{time_point}_confidence"
+                confidence = result_data.get(confidence_key)
+                if confidence is not None:
+                    time_point_agg = strategy_agg[time_point]
+                    time_point_agg["total_confidence"] += confidence
+                    time_point_agg["valid_count"] += 1
+                    if is_match:
+                        time_point_agg["correct_confidences"].append(confidence)
+                    else:
+                        time_point_agg["incorrect_confidences"].append(confidence)
+
+            # Track confidence changes (requires both before and after)
+            before_confidence = result_data.get("before_confidence")
+            after_confidence = result_data.get("after_confidence")
+            if before_confidence is not None and after_confidence is not None:
+                change = after_confidence - before_confidence
+                strategy_agg["confidence_changes"].append(change)
+                if is_match:
+                    strategy_agg["correct_confidence_changes"].append(change)
+                else:
+                    strategy_agg["incorrect_confidence_changes"].append(change)
+
+                if change > 0:
+                    strategy_agg["confidence_changes_by_result"]["increased"] += 1
+                elif change < 0:
+                    strategy_agg["confidence_changes_by_result"]["decreased"] += 1
+                else:
+                    strategy_agg["confidence_changes_by_result"]["unchanged"] += 1
+
+def _calculate_stat_averages(stats_block: Dict[str, Any], strategies: List[str]) -> None:
+    """
+    Calculates average statistics from accumulated totals and lists, modifying the block in place.
+
+    Args:
+        stats_block: The statistics block dictionary containing totals and lists.
+        strategies: List of confidence strategy names.
+    """
+    total = stats_block["total"]
+    matches = stats_block["matches"]
+    stats_block["match_rate"] = f"{(matches / total) * 100:.2f}%" if total > 0 else "0.00%"
+
+    # Helper to safely calculate average
+    def safe_avg(data_list):
+        return sum(data_list) / len(data_list) if data_list else None
+
+    for strategy in strategies:
+        strategy_agg = stats_block["by_confidence_strategy"][strategy] # Aggregated totals/counts/lists
+        strategy_calc = stats_block["confidence_stats"][strategy] # Place for calculated averages
+
+        # Calculate before/after averages
+        for time_point in TIME_POINTS:
+            time_point_agg = strategy_agg[time_point]
+            time_point_calc = strategy_calc[time_point]
+
+            # Overall averages
+            if time_point_agg["valid_count"] > 0:
+                time_point_calc["avg_confidence"] = time_point_agg["total_confidence"] / time_point_agg["valid_count"]
+
+            # Averages based on correctness
+            time_point_calc["avg_confidence_when_correct"] = safe_avg(time_point_agg["correct_confidences"])
+            time_point_calc["avg_confidence_when_incorrect"] = safe_avg(time_point_agg["incorrect_confidences"])
+
+        # Calculate average changes
+        strategy_calc["avg_confidence_change"] = safe_avg(strategy_agg["confidence_changes"])
+        strategy_calc["avg_confidence_change_when_correct"] = safe_avg(strategy_agg["correct_confidence_changes"])
+        strategy_calc["avg_confidence_change_when_incorrect"] = safe_avg(strategy_agg["incorrect_confidence_changes"])
+
+        # Copy the change counts
+        strategy_calc["confidence_changes_by_result"] = strategy_agg["confidence_changes_by_result"]
+
+# --- End Helper Functions ---
 
 def save_multiple_evaluations_to_json(evaluations: List[Dict[str, Any]], model_name: str, provider: str) -> str:
     """
-    Save multiple evaluations data to a single JSON file.
+    Save multiple evaluations data to a single JSON file, including summary statistics.
 
     Args:
         evaluations: List of evaluation results
@@ -351,295 +479,75 @@ def save_multiple_evaluations_to_json(evaluations: List[Dict[str, Any]], model_n
     """
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    # Calculate summary statistics
-    total = len(evaluations)
-    matches = sum(1 for eval in evaluations if eval.get("match", False))
-    match_rate = (matches / total) * 100 if total > 0 else 0
-
     # Identify all confidence strategies used
     all_strategies = set()
-    for eval in evaluations:
-        if "confidence_results" in eval:
-            all_strategies.update(eval["confidence_results"].keys())
+    for eval_item in evaluations:
+        if "confidence_results" in eval_item:
+            all_strategies.update(eval_item["confidence_results"].keys())
+    all_strategies = sorted(list(all_strategies)) # Ensure consistent order
 
-    # Calculate confidence statistics for each strategy
-    confidence_stats = {}
-    for strategy in all_strategies:
-        strategy_data = {
-            "before_total_confidence": 0,
-            "before_valid_count": 0,
-            "before_avg_confidence": None,
-            "after_total_confidence": 0,
-            "after_valid_count": 0,
-            "after_avg_confidence": None,
-            "before_correct_confidences": [],
-            "before_incorrect_confidences": [],
-            "after_correct_confidences": [],
-            "after_incorrect_confidences": [],
-            "before_avg_confidence_when_correct": None,
-            "before_avg_confidence_when_incorrect": None,
-            "after_avg_confidence_when_correct": None,
-            "after_avg_confidence_when_incorrect": None,
-            "avg_confidence_change": None,
-            "avg_confidence_change_when_correct": None,
-            "avg_confidence_change_when_incorrect": None,
-            "confidence_changes_by_result": {
-                "increased": 0,
-                "decreased": 0,
-                "unchanged": 0
-            }
-        }
-
-        for eval in evaluations:
-            if "confidence_results" in eval and strategy in eval["confidence_results"]:
-                before_confidence = eval["confidence_results"][strategy].get("before_confidence")
-                after_confidence = eval["confidence_results"][strategy].get("after_confidence")
-
-                # Track before confidence
-                if before_confidence is not None:
-                    strategy_data["before_total_confidence"] += before_confidence
-                    strategy_data["before_valid_count"] += 1
-
-                    if eval.get("match", False):
-                        strategy_data["before_correct_confidences"].append(before_confidence)
-                    else:
-                        strategy_data["before_incorrect_confidences"].append(before_confidence)
-
-                # Track after confidence
-                if after_confidence is not None:
-                    strategy_data["after_total_confidence"] += after_confidence
-                    strategy_data["after_valid_count"] += 1
-
-                    if eval.get("match", False):
-                        strategy_data["after_correct_confidences"].append(after_confidence)
-                    else:
-                        strategy_data["after_incorrect_confidences"].append(after_confidence)
-
-                # Track confidence changes
-                if before_confidence is not None and after_confidence is not None:
-                    change = after_confidence - before_confidence
-                    if change > 0:
-                        strategy_data["confidence_changes_by_result"]["increased"] += 1
-                    elif change < 0:
-                        strategy_data["confidence_changes_by_result"]["decreased"] += 1
-                    else:
-                        strategy_data["confidence_changes_by_result"]["unchanged"] += 1
-
-        # Calculate averages
-        if strategy_data["before_valid_count"] > 0:
-            strategy_data["before_avg_confidence"] = strategy_data["before_total_confidence"] / strategy_data["before_valid_count"]
-
-        if strategy_data["after_valid_count"] > 0:
-            strategy_data["after_avg_confidence"] = strategy_data["after_total_confidence"] / strategy_data["after_valid_count"]
-
-        if strategy_data["before_correct_confidences"]:
-            strategy_data["before_avg_confidence_when_correct"] = sum(strategy_data["before_correct_confidences"]) / len(strategy_data["before_correct_confidences"])
-
-        if strategy_data["before_incorrect_confidences"]:
-            strategy_data["before_avg_confidence_when_incorrect"] = sum(strategy_data["before_incorrect_confidences"]) / len(strategy_data["before_incorrect_confidences"])
-
-        if strategy_data["after_correct_confidences"]:
-            strategy_data["after_avg_confidence_when_correct"] = sum(strategy_data["after_correct_confidences"]) / len(strategy_data["after_correct_confidences"])
-
-        if strategy_data["after_incorrect_confidences"]:
-            strategy_data["after_avg_confidence_when_incorrect"] = sum(strategy_data["after_incorrect_confidences"]) / len(strategy_data["after_incorrect_confidences"])
-
-        # Calculate average confidence change
-        confidence_changes = []
-        correct_confidence_changes = []
-        incorrect_confidence_changes = []
-
-        for eval in evaluations:
-            if "confidence_results" in eval and strategy in eval["confidence_results"]:
-                before_confidence = eval["confidence_results"][strategy].get("before_confidence")
-                after_confidence = eval["confidence_results"][strategy].get("after_confidence")
-
-                if before_confidence is not None and after_confidence is not None:
-                    change = after_confidence - before_confidence
-                    confidence_changes.append(change)
-
-                    if eval.get("match", False):
-                        correct_confidence_changes.append(change)
-                    else:
-                        incorrect_confidence_changes.append(change)
-
-        if confidence_changes:
-            strategy_data["avg_confidence_change"] = sum(confidence_changes) / len(confidence_changes)
-
-        if correct_confidence_changes:
-            strategy_data["avg_confidence_change_when_correct"] = sum(correct_confidence_changes) / len(correct_confidence_changes)
-
-        if incorrect_confidence_changes:
-            strategy_data["avg_confidence_change_when_incorrect"] = sum(incorrect_confidence_changes) / len(incorrect_confidence_changes)
-
-        confidence_stats[strategy] = strategy_data
-
-    # Group by language and difficulty
+    # Initialize statistics blocks
+    overall_stats = _initialize_stats_block(all_strategies)
     by_language = {}
     by_difficulty = {}
 
-    for eval in evaluations:
-        example = eval.get("example", {})
+    # --- Process Evaluations ---
+    for eval_item in evaluations:
+        example = eval_item.get("example", {})
         lang = example.get("language", "unknown").lower()
         difficulty = example.get("difficulty", "?")
 
-        # Initialize language data if needed
+        # Ensure nested stats blocks exist
         if lang not in by_language:
-            by_language[lang] = {
-                "total": 0,
-                "matches": 0,
-                "by_difficulty": {},
-                "by_confidence_strategy": {}
-            }
-
-            # Initialize confidence data for each strategy
-            for strategy in all_strategies:
-                by_language[lang]["by_confidence_strategy"][strategy] = {
-                    "before_total_confidence": 0,
-                    "before_valid_count": 0,
-                    "before_avg_confidence": None,
-                    "after_total_confidence": 0,
-                    "after_valid_count": 0,
-                    "after_avg_confidence": None
-                }
-
-        by_language[lang]["total"] += 1
-
-        # Update confidence data for each strategy
-        for strategy in all_strategies:
-            if "confidence_results" in eval and strategy in eval["confidence_results"]:
-                before_confidence = eval["confidence_results"][strategy].get("before_confidence")
-                after_confidence = eval["confidence_results"][strategy].get("after_confidence")
-
-                if before_confidence is not None:
-                    by_language[lang]["by_confidence_strategy"][strategy]["before_total_confidence"] += before_confidence
-                    by_language[lang]["by_confidence_strategy"][strategy]["before_valid_count"] += 1
-
-                if after_confidence is not None:
-                    by_language[lang]["by_confidence_strategy"][strategy]["after_total_confidence"] += after_confidence
-                    by_language[lang]["by_confidence_strategy"][strategy]["after_valid_count"] += 1
-
-        if eval.get("match", False):
-            by_language[lang]["matches"] += 1
-
-        # Group by difficulty within language
-        if difficulty not in by_language[lang]["by_difficulty"]:
-            by_language[lang]["by_difficulty"][difficulty] = {
-                "total": 0,
-                "matches": 0,
-                "by_confidence_strategy": {}
-            }
-
-            # Initialize confidence data for each strategy
-            for strategy in all_strategies:
-                by_language[lang]["by_difficulty"][difficulty]["by_confidence_strategy"][strategy] = {
-                    "before_total_confidence": 0,
-                    "before_valid_count": 0,
-                    "before_avg_confidence": None,
-                    "after_total_confidence": 0,
-                    "after_valid_count": 0,
-                    "after_avg_confidence": None
-                }
-
-        by_language[lang]["by_difficulty"][difficulty]["total"] += 1
-
-        # Update confidence data for difficulty level and strategy
-        for strategy in all_strategies:
-            if "confidence_results" in eval and strategy in eval["confidence_results"]:
-                before_confidence = eval["confidence_results"][strategy].get("before_confidence")
-                after_confidence = eval["confidence_results"][strategy].get("after_confidence")
-
-                if before_confidence is not None:
-                    by_language[lang]["by_difficulty"][difficulty]["by_confidence_strategy"][strategy]["before_total_confidence"] += before_confidence
-                    by_language[lang]["by_difficulty"][difficulty]["by_confidence_strategy"][strategy]["before_valid_count"] += 1
-
-                if after_confidence is not None:
-                    by_language[lang]["by_difficulty"][difficulty]["by_confidence_strategy"][strategy]["after_total_confidence"] += after_confidence
-                    by_language[lang]["by_difficulty"][difficulty]["by_confidence_strategy"][strategy]["after_valid_count"] += 1
-
-        if eval.get("match", False):
-            by_language[lang]["by_difficulty"][difficulty]["matches"] += 1
-
-        # Initialize difficulty data if needed
+            by_language[lang] = _initialize_stats_block(all_strategies)
+            by_language[lang]["by_difficulty"] = {} # Add container for difficulty within language
         if difficulty not in by_difficulty:
-            by_difficulty[difficulty] = {
-                "total": 0,
-                "matches": 0,
-                "by_confidence_strategy": {}
-            }
+            by_difficulty[difficulty] = _initialize_stats_block(all_strategies)
+        if difficulty not in by_language[lang]["by_difficulty"]:
+             by_language[lang]["by_difficulty"][difficulty] = _initialize_stats_block(all_strategies)
 
-            # Initialize confidence data for each strategy
-            for strategy in all_strategies:
-                by_difficulty[difficulty]["by_confidence_strategy"][strategy] = {
-                    "before_total_confidence": 0,
-                    "before_valid_count": 0,
-                    "before_avg_confidence": None,
-                    "after_total_confidence": 0,
-                    "after_valid_count": 0,
-                    "after_avg_confidence": None
-                }
 
-        by_difficulty[difficulty]["total"] += 1
+        # Update all relevant statistics blocks
+        _update_stats_block(overall_stats, eval_item, all_strategies)
+        _update_stats_block(by_language[lang], eval_item, all_strategies)
+        _update_stats_block(by_difficulty[difficulty], eval_item, all_strategies)
+        _update_stats_block(by_language[lang]["by_difficulty"][difficulty], eval_item, all_strategies)
 
-        # Update confidence data for each strategy
-        for strategy in all_strategies:
-            if "confidence_results" in eval and strategy in eval["confidence_results"]:
-                before_confidence = eval["confidence_results"][strategy].get("before_confidence")
-                after_confidence = eval["confidence_results"][strategy].get("after_confidence")
+    # --- Calculate Averages for all Blocks ---
+    _calculate_stat_averages(overall_stats, all_strategies)
+    for lang_stats in by_language.values():
+        _calculate_stat_averages(lang_stats, all_strategies)
+        for diff_stats in lang_stats.get("by_difficulty", {}).values():
+             _calculate_stat_averages(diff_stats, all_strategies)
+    for diff_stats in by_difficulty.values():
+        _calculate_stat_averages(diff_stats, all_strategies)
 
-                if before_confidence is not None:
-                    by_difficulty[difficulty]["by_confidence_strategy"][strategy]["before_total_confidence"] += before_confidence
-                    by_difficulty[difficulty]["by_confidence_strategy"][strategy]["before_valid_count"] += 1
 
-                if after_confidence is not None:
-                    by_difficulty[difficulty]["by_confidence_strategy"][strategy]["after_total_confidence"] += after_confidence
-                    by_difficulty[difficulty]["by_confidence_strategy"][strategy]["after_valid_count"] += 1
+    # --- Assemble Final Data Structure ---
+    # Clean up the stats blocks by removing intermediate list storage if desired,
+    # or keep them for potential future analysis. We'll keep them for now.
+    # Extract overall confidence stats for top-level summary.
+    final_confidence_stats = overall_stats["confidence_stats"] # This now has nested before/after
 
-        if eval.get("match", False):
-            by_difficulty[difficulty]["matches"] += 1
-
-    # Calculate average confidence for each category and strategy
-    for lang in by_language:
-        for strategy in all_strategies:
-            strategy_data = by_language[lang]["by_confidence_strategy"][strategy]
-            if strategy_data["before_valid_count"] > 0:
-                strategy_data["before_avg_confidence"] = strategy_data["before_total_confidence"] / strategy_data["before_valid_count"]
-            if strategy_data["after_valid_count"] > 0:
-                strategy_data["after_avg_confidence"] = strategy_data["after_total_confidence"] / strategy_data["after_valid_count"]
-
-        for diff in by_language[lang]["by_difficulty"]:
-            for strategy in all_strategies:
-                strategy_data = by_language[lang]["by_difficulty"][diff]["by_confidence_strategy"][strategy]
-                if strategy_data["before_valid_count"] > 0:
-                    strategy_data["before_avg_confidence"] = strategy_data["before_total_confidence"] / strategy_data["before_valid_count"]
-                if strategy_data["after_valid_count"] > 0:
-                    strategy_data["after_avg_confidence"] = strategy_data["after_total_confidence"] / strategy_data["after_valid_count"]
-
-    for diff in by_difficulty:
-        for strategy in all_strategies:
-            strategy_data = by_difficulty[diff]["by_confidence_strategy"][strategy]
-            if strategy_data["before_valid_count"] > 0:
-                strategy_data["before_avg_confidence"] = strategy_data["before_total_confidence"] / strategy_data["before_valid_count"]
-            if strategy_data["after_valid_count"] > 0:
-                strategy_data["after_avg_confidence"] = strategy_data["after_total_confidence"] / strategy_data["after_valid_count"]
 
     data = {
         "timestamp": timestamp,
         "provider": provider,
         "model": model_name,
-        "total_examples": total,
-        "total_matches": matches,
-        "match_rate": f"{match_rate:.2f}%",
-        "confidence_strategies": list(all_strategies),
-        "confidence_stats": confidence_stats,
+        "total_examples": overall_stats["total"],
+        "total_matches": overall_stats["matches"],
+        "match_rate": overall_stats["match_rate"],
+        "confidence_strategies": all_strategies,
+        "confidence_stats": final_confidence_stats, # Use calculated stats from overall
         "by_language": by_language,
         "by_difficulty": by_difficulty,
-        "evaluations": evaluations
+        "evaluations": evaluations # Keep individual evaluations
     }
 
     # Save to the output/evals directory
     output_dir = "output/evals"
-    return save_to_json(data, f"batch_evaluation_{provider}_{model_name.replace('-', '_')}", output_dir)
+    filename = f"batch_evaluation_{provider}_{model_name.replace('-', '_')}"
+    return save_to_json(data, filename, output_dir)
 
 def evaluate_example(client, example: Dict[str, Any], model_name: str, provider: str,
                     confidence_strategies: List[str] = None) -> Dict[str, Any]:
@@ -810,168 +718,161 @@ def main():
         return
 
     # Filter by language if specified
+    filtered_examples = examples
     if args.language:
-        matching_examples = [ex for ex in examples if ex.get('language', '').lower() == args.language.lower()]
+        lang_lower = args.language.lower()
+        matching_examples = [ex for ex in examples if ex.get('language', '').lower() == lang_lower]
         if not matching_examples:
             print(f"No examples found for language: {args.language}")
             print(f"Available languages: {', '.join(set(ex.get('language', '') for ex in examples))}")
             return
-        examples = matching_examples
+        filtered_examples = matching_examples
 
-    # If run-all is specified, evaluate all examples
+    examples_to_run = []
     if args.run_all:
-        if args.dry_run:
-            print("\n=== DRY RUN ===")
-            print(f"Provider: {args.provider}")
-            print(f"Model: {args.model}")
-            print(f"Confidence strategies: {', '.join(confidence_strategies)}")
-            print(f"\nWould evaluate {len(examples)} examples.")
-            print("No API call will be made. Exiting.")
+        examples_to_run = filtered_examples
+        if not examples_to_run:
+            print("No examples selected to run.")
             return
+        print(f"Preparing to evaluate {len(examples_to_run)} examples...")
+    else:
+        # Select a single random example
+        selected_example = select_random_example(filtered_examples)
+        if not selected_example:
+            print("No example selected to run.")
+            return
+        examples_to_run = [selected_example]
+        print(f"Selected 1 random example to evaluate.")
 
-        print(f"Running evaluation on {len(examples)} examples. This may take a while...")
-        print(f"Using confidence strategies: {', '.join(confidence_strategies)}")
-        evaluations = []
-        correct_count = 0
-        # Track before/after confidence separately
-        total_before_confidence = {strategy: 0 for strategy in confidence_strategies}
-        valid_before_confidence_count = {strategy: 0 for strategy in confidence_strategies}
-        total_after_confidence = {strategy: 0 for strategy in confidence_strategies}
-        valid_after_confidence_count = {strategy: 0 for strategy in confidence_strategies}
-
-        for i, example in enumerate(examples, 1):
-            print(f"[{i}/{len(examples)}] Evaluating {example['language']} example (difficulty {example.get('difficulty', '?')})...", end="", flush=True)
-
-            evaluation = evaluate_example(client, example, args.model, args.provider, confidence_strategies)
-            if evaluation:
-                evaluations.append(evaluation)
-
-                # Track before and after confidence separately
-                for strategy in confidence_strategies:
-                    before_confidence = evaluation["confidence_results"][strategy].get("before_confidence")
-                    after_confidence = evaluation["confidence_results"][strategy].get("after_confidence")
-
-                    if before_confidence is not None:
-                        total_before_confidence[strategy] += before_confidence
-                        valid_before_confidence_count[strategy] += 1
-
-                    if after_confidence is not None:
-                        total_after_confidence[strategy] += after_confidence
-                        valid_after_confidence_count[strategy] += 1
-
-                # Use primary confidence for display
-                before_confidence = evaluation.get("before_confidence")
-                after_confidence = evaluation.get("after_confidence")
-                before_display = f" (before: {before_confidence:.2f})" if before_confidence is not None else ""
-                after_display = f" (after: {after_confidence:.2f})" if after_confidence is not None else ""
-                confidence_display = f"{before_display}{after_display}"
-
-                if evaluation["match"]:
-                    result = "✓ CORRECT"
-                    correct_count += 1
-                else:
-                    result = "✗ WRONG"
-
-                print(f" {result}{confidence_display}")
-                print(f"  Expected: {evaluation['expected_answer']}")
-                print(f"  Model's answer: {evaluation['extracted_answer']}")
-
-                # Show all confidence values if there are multiple strategies
-                if len(confidence_strategies) > 1:
-                    for strategy in confidence_strategies:
-                        before_conf = evaluation["confidence_results"][strategy]["before_confidence"]
-                        after_conf = evaluation["confidence_results"][strategy]["after_confidence"]
-                        before_str = f"{before_conf:.2f}" if before_conf is not None else "N/A"
-                        after_str = f"{after_conf:.2f}" if after_conf is not None else "N/A"
-                        print(f"  {strategy} confidence: before={before_str}, after={after_str}")
-            else:
-                print(" ERROR")
-
-        # Save all evaluations to a single file
-        filename = save_multiple_evaluations_to_json(evaluations, args.model, args.provider)
-
-        # Print summary
-        match_rate = (correct_count / len(evaluations)) * 100 if evaluations else 0
-
-        print("\n=== Evaluation Summary ===")
-        print(f"Total examples: {len(evaluations)}")
-        print(f"Correct answers: {correct_count} ({match_rate:.2f}%)")
-
-        # Print confidence summaries for each strategy
-        for strategy in confidence_strategies:
-            if valid_before_confidence_count[strategy] > 0 or valid_after_confidence_count[strategy] > 0:
-                avg_before_confidence = total_before_confidence[strategy] / valid_before_confidence_count[strategy]
-                avg_after_confidence = total_after_confidence[strategy] / valid_after_confidence_count[strategy]
-                print(f"{strategy} average confidence: before={avg_before_confidence:.2f} (valid: {valid_before_confidence_count[strategy]}/{len(evaluations)}), after={avg_after_confidence:.2f} (valid: {valid_after_confidence_count[strategy]}/{len(evaluations)})")
-
-        print(f"Results saved to {filename}")
-        return
-
-    # If not run-all, select a random example (original behavior)
-    example = select_random_example(examples, args.language)
-    if not example:
-        return
-
-    # If dry run, show what would be sent and exit
+    # --- Handle Dry Run ---
     if args.dry_run:
         print("\n=== DRY RUN ===")
         print(f"Provider: {args.provider}")
         print(f"Model: {args.model}")
         print(f"Confidence strategies: {', '.join(confidence_strategies)}")
-        print(f"\nExample selected:")
-        print(f"Language: {example['language']}")
-        print(f"Difficulty: {example['difficulty']}")
-        expected_answer = example.get('verified_answer', example.get('answer', ''))
+
+        if not examples_to_run:
+            print("\nNo examples selected for dry run.")
+            return
+
+        # Show details for the first example
+        first_example = examples_to_run[0]
+        print(f"\nExample (1 of {len(examples_to_run)}):")
+        print(f"Language: {first_example['language']}")
+        print(f"Difficulty: {first_example.get('difficulty', '?')}")
+        expected_answer = first_example.get('verified_answer', first_example.get('answer', ''))
         print(f"Expected Answer: {expected_answer}")
 
         print("\nPrompts that would be sent:")
         # Show all confidence prompts
         for i, strategy in enumerate(confidence_strategies):
-            print(f"\n=== Confidence Prompt {i+1}: {strategy} ===")
+            print(f"\n=== Confidence Prompt {i+1}: {strategy} (Before Answer) ===")
             print("=" * 40)
-            print(CONFIDENCE_PROMPTS[strategy]["before_template"].format(code=example['code']))
+            print(CONFIDENCE_PROMPTS[strategy]["before_template"].format(code=first_example['code']))
             print("=" * 40)
 
         # Show evaluation prompt
         print("\n=== Evaluation Prompt ===")
         print("=" * 40)
-        print(EVALUATION_PROMPT_TEMPLATE.format(code=example['code']))
+        print(EVALUATION_PROMPT_TEMPLATE.format(code=first_example['code']))
         print("=" * 40)
 
-        print("\nNo API calls will be made. Exiting.")
+        # Show 'after' confidence prompts
+        for i, strategy in enumerate(confidence_strategies):
+            print(f"\n=== Confidence Prompt {i+1}: {strategy} (After Answer) ===")
+            print("=" * 40)
+            print(CONFIDENCE_PROMPTS[strategy]["after_template"].format(code=first_example['code']))
+            print("=" * 40)
+
+        print(f"\nWould evaluate {len(examples_to_run)} example(s) in total.")
+        print("No API calls will be made. Exiting.")
         return
 
-    # Evaluate the example
-    evaluation = evaluate_example(client, example, args.model, args.provider, confidence_strategies)
-    if not evaluation:
-        print("Failed to evaluate example")
+    # --- Execute Evaluation Run (Unified for single or multiple) ---
+    print(f"Running evaluation on {len(examples_to_run)} example(s). This may take a while...")
+    print(f"Using confidence strategies: {', '.join(confidence_strategies)}")
+
+    evaluations = []
+    # Summary tracking (can be derived later, but useful for progress)
+    correct_count = 0
+
+    for i, example in enumerate(examples_to_run, 1):
+        print(f"\n[{i}/{len(examples_to_run)}] Evaluating {example['language']} example (difficulty {example.get('difficulty', '?')})...", end="", flush=True)
+
+        evaluation = evaluate_example(client, example, args.model, args.provider, confidence_strategies)
+        if evaluation:
+            evaluations.append(evaluation)
+
+            # Use primary confidence for concise display
+            primary_strategy = confidence_strategies[0]
+            before_confidence = evaluation["confidence_results"][primary_strategy].get("before_confidence")
+            after_confidence = evaluation["confidence_results"][primary_strategy].get("after_confidence")
+            before_display = f" (conf before: {before_confidence:.2f})" if before_confidence is not None else ""
+            after_display = f" (conf after: {after_confidence:.2f})" if after_confidence is not None else ""
+            confidence_display = f"{before_display}{after_display}"
+
+            if evaluation["match"]:
+                result = "✓ CORRECT"
+                correct_count += 1
+            else:
+                result = "✗ WRONG"
+
+            # Print per-example result immediately
+            print(f" {result}{confidence_display}")
+            print(f"  Expected: {evaluation['expected_answer']}")
+            print(f"  Model's answer: {evaluation['extracted_answer']}")
+
+            # Show all confidence values if there are multiple strategies
+            if len(confidence_strategies) > 1:
+                for strategy in confidence_strategies:
+                    before_conf = evaluation["confidence_results"][strategy].get("before_confidence")
+                    after_conf = evaluation["confidence_results"][strategy].get("after_confidence")
+                    before_str = f"{before_conf:.2f}" if before_conf is not None else "N/A"
+                    after_str = f"{after_conf:.2f}" if after_conf is not None else "N/A"
+                    print(f"  {strategy} confidence: before={before_str}, after={after_str}")
+        else:
+            print(" ERROR (evaluation failed)") # More specific error message
+
+    # --- Save Results and Print Summary ---
+    if not evaluations:
+        print("\nNo evaluations were successfully completed.")
         return
 
-    # Print results
-    print("\nEvaluation Results:")
-    print(f"Language: {example['language']}")
-    print(f"Difficulty: {example['difficulty']}")
-    print(f"Expected Answer: {evaluation['expected_answer']}")
-    print(f"Model's Answer: {evaluation['extracted_answer']}")
-    print(f"Match: {evaluation['match']}")
+    # Save all evaluations (1 or more) to a single file with aggregated stats
+    filename = save_multiple_evaluations_to_json(evaluations, args.model, args.provider)
 
-    # Print confidence results for each strategy
-    print("\nConfidence Estimates:")
+    # Load the summary stats back from the saved file (or recalculate)
+    # For simplicity, we'll just recalculate the top-level summary here
+    total_evaluated = len(evaluations)
+    final_match_rate = (correct_count / total_evaluated) * 100 if total_evaluated else 0
+
+    print("\n=== Evaluation Summary ===")
+    print(f"Total examples evaluated: {total_evaluated}")
+    print(f"Correct answers: {correct_count} ({final_match_rate:.2f}%)")
+
+    # Calculate and print average confidences from the collected evaluations
+    # This duplicates some logic from save_multiple_evaluations_to_json but keeps main cleaner
+    avg_confidences = {}
     for strategy in confidence_strategies:
-        before_confidence = evaluation["confidence_results"][strategy]["before_confidence"]
-        after_confidence = evaluation["confidence_results"][strategy]["after_confidence"]
-        before_str = f"{before_confidence:.2f}" if before_confidence is not None else "Unable to extract"
-        after_str = f"{after_confidence:.2f}" if after_confidence is not None else "Unable to extract"
-        print(f"  {strategy}: before={before_str}, after={after_str}")
+        before_total = 0.0
+        before_count = 0
+        after_total = 0.0
+        after_count = 0
+        for ev in evaluations:
+            if strategy in ev["confidence_results"]:
+                before_c = ev["confidence_results"][strategy].get("before_confidence")
+                after_c = ev["confidence_results"][strategy].get("after_confidence")
+                if before_c is not None:
+                    before_total += before_c
+                    before_count += 1
+                if after_c is not None:
+                    after_total += after_c
+                    after_count += 1
 
-        # Show confidence change
-        if before_confidence is not None and after_confidence is not None:
-            change = after_confidence - before_confidence
-            direction = "increased" if change > 0 else "decreased" if change < 0 else "unchanged"
-            print(f"    Change: {direction} by {abs(change):.2f}")
+        avg_before = f"{(before_total / before_count):.2f}" if before_count > 0 else "N/A"
+        avg_after = f"{(after_total / after_count):.2f}" if after_count > 0 else "N/A"
+        print(f"{strategy.capitalize()} average confidence: Before={avg_before} (n={before_count}), After={avg_after} (n={after_count})")
 
-    # Save to JSON
-    filename = save_single_evaluation_with_confidence(evaluation, args.model, args.provider)
     print(f"\nResults saved to {filename}")
 
 if __name__ == "__main__":
