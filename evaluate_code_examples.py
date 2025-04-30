@@ -23,7 +23,10 @@ from ai_utils import (
     create_client,
     query_model,
     list_models,
-    save_to_json
+    save_to_json,
+    query_model_with_history,
+    StandardConversation,
+    StandardMessage,
 )
 
 EVALUATION_PROMPT_TEMPLATE = """
@@ -64,24 +67,35 @@ CONFIDENCE_STRATEGY_DEFINITIONS = {
 # Default confidence prompt strategy
 DEFAULT_CONFIDENCE_STRATEGY = "standard"
 
-def get_confidence_prompt(strategy: str, time_point: str, code: str) -> str:
+def get_before_confidence_prompt(strategy: str, code: str) -> str:
     """
-    Constructs the confidence prompt based on strategy, time point, and code.
+    Constructs the 'before' confidence prompt (including the code).
 
     Args:
         strategy: The confidence strategy ('standard', 'inverse').
-        time_point: 'before' or 'after'.
         code: The code snippet for the prompt.
 
     Returns:
         The fully constructed prompt string.
     """
-    prefix = PROMPT_BEFORE_PREFIX if time_point == "before" else PROMPT_AFTER_PREFIX
     strategy_request = PROMPT_STRATEGY_REQUESTS[strategy]
 
     # Assemble the prompt parts
-    prompt = f"{prefix} {strategy_request} {PROMPT_COMMON_SUFFIX}\n\n{PROMPT_CODE_BLOCK.format(code=code)}"
+    prompt = f"{PROMPT_BEFORE_PREFIX} {strategy_request} {PROMPT_COMMON_SUFFIX}\n\n{PROMPT_CODE_BLOCK.format(code=code)}"
     return prompt.strip()
+
+def get_after_confidence_prompt_text(strategy: str) -> str:
+    """
+    Constructs the text for the 'after' confidence prompt (without code).
+
+    Args:
+        strategy: The confidence strategy ('standard', 'inverse').
+
+    Returns:
+        The prompt text string.
+    """
+    strategy_request = PROMPT_STRATEGY_REQUESTS[strategy]
+    return f"{PROMPT_AFTER_PREFIX} {strategy_request} {PROMPT_COMMON_SUFFIX}".strip()
 
 def load_examples_from_json(file_path: str) -> List[Dict[str, Any]]:
     """
@@ -571,63 +585,78 @@ def evaluate_example(client, example: Dict[str, Any], model_name: str, provider:
 
     # Evaluate "before" confidence for each strategy
     for strategy in confidence_strategies:
-        # Get the prompt template for this strategy
-        confidence_prompt = get_confidence_prompt(strategy, "before", example['code'])
+        before_confidence_prompt = get_before_confidence_prompt(strategy, example['code'])
 
         # Query the model
-        confidence_response = query_model(client, confidence_prompt, model_name)
+        before_confidence_response = query_model(client, before_confidence_prompt, model_name)
 
         # Extract confidence using the appropriate function
         confidence = None
-        if confidence_response:
-            confidence = extract_confidence(confidence_response, strategy)
+        if before_confidence_response:
+            confidence = extract_confidence(before_confidence_response, strategy)
 
-        # Store results
+        # Store results (initialize after prompt/response/confidence to None)
         confidence_results[strategy] = {
-            "before_prompt": confidence_prompt,
-            "before_response": confidence_response,
+            "before_prompt": before_confidence_prompt,
+            "before_response": before_confidence_response,
             "before_confidence": confidence,
             "after_prompt": None,
             "after_response": None,
             "after_confidence": None
         }
 
-    # Now evaluate the actual example
+    # --- Now evaluate the actual example ---
+    # Start a new conversation for the evaluation itself
     prompt = EVALUATION_PROMPT_TEMPLATE.format(code=example['code'])
+    initial_eval_conversation: StandardConversation = [{"role": "user", "content": prompt}]
+    # Get the full updated conversation including the model's first answer
+    eval_conversation = query_model_with_history(client, model_name, initial_eval_conversation[:])
 
-    response = query_model(client, prompt, model_name)
-
-    if not response:
+    # Check if the evaluation API call was successful
+    if len(eval_conversation) <= len(initial_eval_conversation):
         print(f"No response received from the API for example: {example.get('language', 'Unknown')} difficulty {example.get('difficulty', '?')}")
+        # Can't proceed with 'after' confidence if evaluation failed
         return None
 
     # Extract the answer
-    extracted_answer = extract_final_answer(response)
+    # The answer is the content of the last message in the conversation
+    model_answer_message = eval_conversation[-1]
+    full_response_text = model_answer_message.get("content", "")
+    extracted_answer = extract_final_answer(full_response_text)
     expected_answer = example.get('verified_answer', example.get('answer', ''))
 
-    # Evaluate "after" confidence for each strategy now that we have the answer
+    # --- Evaluate "after" confidence for each strategy ---
+    # Use the *same conversation* where the model just answered
     for strategy in confidence_strategies:
-        # Get the prompt template for this strategy
-        confidence_prompt = get_confidence_prompt(strategy, "after", example['code'])
+        after_prompt_text = get_after_confidence_prompt_text(strategy)
+        after_prompt_message: StandardMessage = {"role": "user", "content": after_prompt_text}
 
-        # Query the model
-        confidence_response = query_model(client, confidence_prompt, model_name)
+        # Create a *copy* of the conversation to append to, for this specific strategy query
+        current_conversation_for_after_query = eval_conversation[:]
+        current_conversation_for_after_query.append(after_prompt_message)
+
+        # Pass the updated conversation history
+        final_conversation = query_model_with_history(client, model_name, current_conversation_for_after_query)
 
         # Extract confidence using the appropriate function
         after_confidence = None
-        if confidence_response:
-            after_confidence = extract_confidence(confidence_response, strategy)
+        after_confidence_response_text = None
+        # Check if the API call was successful and extract the last message content
+        if len(final_conversation) > len(current_conversation_for_after_query) and final_conversation[-1]["role"] == "assistant":
+            after_confidence_response_text = final_conversation[-1].get("content", "")
+            if after_confidence_response_text:
+                after_confidence = extract_confidence(after_confidence_response_text, strategy)
 
         # Store results
-        confidence_results[strategy]["after_prompt"] = confidence_prompt
-        confidence_results[strategy]["after_response"] = confidence_response
+        confidence_results[strategy]["after_prompt"] = after_prompt_text # Store the text, not the message object
+        confidence_results[strategy]["after_response"] = after_confidence_response_text
         confidence_results[strategy]["after_confidence"] = after_confidence
 
     # Create evaluation result with combined confidence data
     result = {
         "example": example,
         "prompt": prompt,
-        "full_response": response,
+        "full_response": full_response_text, # The initial response to the eval prompt
         "extracted_answer": extracted_answer,
         "expected_answer": expected_answer,
         "match": extracted_answer.strip() == expected_answer.strip(),
@@ -754,7 +783,7 @@ def main():
         for i, strategy in enumerate(confidence_strategies):
             print(f"\n=== Confidence Prompt {i+1}: {strategy} (Before Answer) ===")
             print("=" * 40)
-            print(get_confidence_prompt(strategy, "before", first_example['code']))
+            print(get_before_confidence_prompt(strategy, first_example['code']))
             print("=" * 40)
 
         # Show evaluation prompt
@@ -767,7 +796,8 @@ def main():
         for i, strategy in enumerate(confidence_strategies):
             print(f"\n=== Confidence Prompt {i+1}: {strategy} (After Answer) ===")
             print("=" * 40)
-            print(get_confidence_prompt(strategy, "after", first_example['code']))
+            # Construct the text dynamically for dry run display
+            print(get_after_confidence_prompt_text(strategy))
             print("=" * 40)
 
         print(f"\nWould evaluate {len(examples_to_run)} example(s) in total.")
