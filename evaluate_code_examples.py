@@ -109,21 +109,40 @@ def load_examples_from_json(file_path: str) -> List[Dict[str, Any]]:
     """
     Load examples from a JSON file.
 
+    Also extracts top-level generation metadata (provider, model, timestamp)
+    and adds it to each individual example dictionary.
+
     Args:
         file_path: Path to the JSON file
 
     Returns:
-        A list of examples
+        A list of example dictionaries, enriched with generation metadata.
     """
     try:
         with open(file_path, 'r', encoding='utf-8') as f:
             data = json.load(f)
 
+        # Extract top-level generation metadata
+        original_provider = data.get('provider', 'unknown')
+        original_model = data.get('model', 'unknown')
+        original_timestamp = data.get('timestamp', 'unknown')
+
         if 'examples' not in data or not isinstance(data['examples'], list):
             print("Error: JSON file doesn't contain an 'examples' array")
             return []
 
-        return data['examples']
+        examples = data['examples']
+
+        # Add generation metadata to each example
+        enriched_examples = []
+        for example in examples:
+            example['original_provider'] = original_provider
+            example['original_model'] = original_model
+            example['original_timestamp'] = original_timestamp
+            enriched_examples.append(example)
+
+        return enriched_examples
+
     except Exception as e:
         print(f"Error loading examples from {file_path}: {e}")
         return []
