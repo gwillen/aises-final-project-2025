@@ -157,13 +157,15 @@ def query_model_with_history(client: APIClient, model_name: str, conversation: S
         elif isinstance(client, Anthropic):
             system_prompt, anthropic_messages = _convert_standard_to_anthropic_format(conversation)
             print(f"Querying Anthropic ({model_name}) with history ({len(anthropic_messages)} messages, system: {system_prompt is not None})")
-            raw_response = client.messages.create(
-                model=model_name,
-                max_tokens=1024, # Keep consistent
-                temperature=0.7, # Keep consistent
-                system=system_prompt, # Pass system prompt if exists
-                messages=anthropic_messages
-            )
+            create_params = {
+                "model": model_name,
+                "max_tokens": 1024, # Keep consistent
+                "temperature": 0.7, # Keep consistent
+                "messages": anthropic_messages
+            }
+            if system_prompt:
+                create_params["system"] = system_prompt
+            raw_response = client.messages.create(**create_params)
         else:
             print(f"Error: Unknown client type: {type(client)}")
             return conversation # Return original conversation on unknown client
