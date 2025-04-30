@@ -29,8 +29,9 @@ from ai_utils import (
     StandardMessage,
 )
 
-EVALUATION_PROMPT_TEMPLATE = """
-What does this program output? Please provide only your best immediate guess at the final answer, on a line by itself; no reasoning, analysis, or commentary.
+EVALUATION_PROMPT_TEMPLATE = """\
+What result does this code output or return? Please provide only your best immediate guess \
+at the final answer, on a line by itself; no reasoning, analysis, or commentary.
 
 ```
 {code}
@@ -38,16 +39,22 @@ What does this program output? Please provide only your best immediate guess at 
 """
 
 # --- Confidence Prompt Components ---
-PROMPT_COMMON_SUFFIX = "Again, please give only the estimate, on a line by itself, without reasoning, analysis, or commentary."
+PROMPT_COMMON_SUFFIX = "Again, please give only the estimate, on a line by " \
+    "itself, without reasoning, analysis, or commentary."
+
 PROMPT_CODE_BLOCK = "```\n{code}\n```"
 
-PROMPT_BEFORE_PREFIX = "In a moment, I will ask you what this program outputs. You will have to provide only your best immediate guess at the final answer, without reasoning, analysis, or commentary. Before I do that, first I want to evaluate your confidence that you can answer correctly."
-# Slightly rephrased for better assembly
-PROMPT_AFTER_PREFIX = "You just gave an answer for the program output. Now, please give me an estimate of your probability that your answer is correct."
+PROMPT_BEFORE_PREFIX = "In a moment, I will ask you what this code outputs or returns. " \
+    "You will have to provide only your best immediate guess at the final answer, " \
+    "without reasoning, analysis, or commentary. Before I do that, first I want to " \
+    "evaluate your confidence that you can answer correctly."
 
 PROMPT_STRATEGY_REQUESTS = {
-    "standard": "Please give me an estimate of your probability that your answer will be correct.",
-    "inverse": "Please give me an estimate of the probability p that your answer is correct, written as 1/p: the number of similar examples you would expect to solve, in order to get one wrong, on average."
+    "standard": "Please give me an estimate of the probability that your " \
+        "answer is correct, written as a number between 0 and 1.",
+    "inverse": "Please give me an estimate of the number of similar problems " \
+        "you would expect to attempt, on average, before getting one wrong. " \
+        "(This equals 1/(1-p), where p is the probability of success.)"
 }
 # --- End Prompt Components ---
 
@@ -59,7 +66,7 @@ CONFIDENCE_STRATEGY_DEFINITIONS = {
         "extract_func": "extract_standard_confidence"
     },
     "inverse": {
-        "description": "Ask for 1/p formulation: number of examples to get one wrong",
+        "description": "Ask for 1/(1-p) formulation: number of examples to get one wrong",
         "extract_func": "extract_inverse_confidence"
     }
 }
@@ -95,7 +102,7 @@ def get_after_confidence_prompt_text(strategy: str) -> str:
         The prompt text string.
     """
     strategy_request = PROMPT_STRATEGY_REQUESTS[strategy]
-    return f"{PROMPT_AFTER_PREFIX} {strategy_request} {PROMPT_COMMON_SUFFIX}".strip()
+    return f"{strategy_request} {PROMPT_COMMON_SUFFIX}".strip()
 
 def load_examples_from_json(file_path: str) -> List[Dict[str, Any]]:
     """
@@ -819,13 +826,13 @@ def main():
         if evaluation:
             evaluations.append(evaluation)
 
-            # Use primary confidence for concise display
-            primary_strategy = confidence_strategies[0]
-            before_confidence = evaluation["confidence_results"][primary_strategy].get("before_confidence")
-            after_confidence = evaluation["confidence_results"][primary_strategy].get("after_confidence")
-            before_display = f" (conf before: {before_confidence:.2f})" if before_confidence is not None else ""
-            after_display = f" (conf after: {after_confidence:.2f})" if after_confidence is not None else ""
-            confidence_display = f"{before_display}{after_display}"
+            confidence_display = ""
+            for strategy in confidence_strategies:
+                before_confidence = evaluation["confidence_results"][strategy].get("before_confidence")
+                after_confidence = evaluation["confidence_results"][strategy].get("after_confidence")
+                before_display = f" (conf before {strategy}: {before_confidence:.2f})" if before_confidence is not None else ""
+                after_display = f" (conf after {strategy}: {after_confidence:.2f})" if after_confidence is not None else ""
+                confidence_display += f"{before_display}{after_display}"
 
             if evaluation["match"]:
                 result = "✓ CORRECT"
