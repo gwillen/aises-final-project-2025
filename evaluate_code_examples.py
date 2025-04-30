@@ -9,11 +9,9 @@ This script:
 4. Saves the result to a JSON file
 """
 
-import os
 import json
 import argparse
 import random
-import sys
 import re
 from datetime import datetime
 from typing import Dict, List, Optional, Any
@@ -54,10 +52,11 @@ PROMPT_STRATEGY_REQUESTS = {
         "answer is correct, written as a number between 0 and 1.",
     "inverse": "Please give me an estimate of the number of similar problems " \
         "you would expect to attempt, on average, before getting one wrong. " \
-        "(This equals 1/(1-p), where p is the probability of success.)"
+        "(This equals 1/(1-p), where p is the probability of success.)",
+    "verbal": "Please give me a verbal estimate of how confident you are " \
+        "that your answer is correct."
 }
 # --- End Prompt Components ---
-
 
 # Confidence prompt strategy definitions (excluding templates)
 CONFIDENCE_STRATEGY_DEFINITIONS = {
@@ -68,11 +67,12 @@ CONFIDENCE_STRATEGY_DEFINITIONS = {
     "inverse": {
         "description": "Ask for 1/(1-p) formulation: number of examples to get one wrong",
         "extract_func": "extract_inverse_confidence"
+    },
+    "verbal": {
+        "description": "Verbal confidence estimate",
+        "extract_func": "extract_verbal_confidence"
     }
 }
-
-# Default confidence prompt strategy
-DEFAULT_CONFIDENCE_STRATEGY = "standard"
 
 def get_before_confidence_prompt(strategy: str, code: str) -> str:
     """
@@ -315,6 +315,19 @@ def extract_inverse_confidence(response: str) -> float:
     # Default to None if we couldn't extract anything
     return None
 
+def extract_verbal_confidence(response: str) -> float:
+    """
+    Extract the confidence estimate from a verbal response.
+
+    Args:
+        response: The full response from the AI
+
+    Returns:
+        None
+    """
+    # For now, just see what kinds of responses it gives.
+    return None
+
 def extract_confidence(response: str, strategy: str) -> float:
     """
     Extract the confidence estimate from the response using the specified strategy.
@@ -328,13 +341,10 @@ def extract_confidence(response: str, strategy: str) -> float:
     """
     extract_func_name = CONFIDENCE_STRATEGY_DEFINITIONS[strategy]["extract_func"]
 
-    # Call the appropriate extraction function
-    if extract_func_name == "extract_standard_confidence":
-        return extract_standard_confidence(response)
-    elif extract_func_name == "extract_inverse_confidence":
-        return extract_inverse_confidence(response)
-    else:
+    if not globals().get(extract_func_name) or not callable(globals()[extract_func_name]):
         raise ValueError(f"Unknown confidence extraction strategy: {strategy}")
+
+    return globals()[extract_func_name](response)
 
 def save_single_evaluation_with_confidence(evaluation: Dict[str, Any], model_name: str, provider: str) -> str:
     # This function is now deprecated, save_multiple_evaluations_to_json handles single cases.
@@ -696,7 +706,7 @@ def main():
                         help='Show what would be sent to the API without actually making the call')
     parser.add_argument('--run-all', action='store_true',
                         help='Run evaluation on all examples in the input file')
-    parser.add_argument('--confidence-strategies', type=str, default=DEFAULT_CONFIDENCE_STRATEGY,
+    parser.add_argument('--confidence-strategies', type=str,
                         help=f'Comma-separated list of confidence strategies to use. Available: {", ".join(CONFIDENCE_STRATEGY_DEFINITIONS.keys())}')
     parser.add_argument('--list-confidence-strategies', action='store_true',
                         help='List available confidence strategies and exit')
@@ -726,13 +736,16 @@ def main():
         return
 
     # Parse confidence strategies
-    confidence_strategies = [s.strip() for s in args.confidence_strategies.split(",")]
-    invalid_strategies = [s for s in confidence_strategies if s not in CONFIDENCE_STRATEGY_DEFINITIONS]
-    if invalid_strategies:
-        print(f"Warning: Unknown confidence strategies: {', '.join(invalid_strategies)}")
-        print(f"Available strategies: {', '.join(CONFIDENCE_STRATEGY_DEFINITIONS.keys())}")
-        print(f"Using default strategy: {DEFAULT_CONFIDENCE_STRATEGY}")
-        confidence_strategies = [DEFAULT_CONFIDENCE_STRATEGY]
+    if not args.confidence_strategies:
+        confidence_strategies = list(CONFIDENCE_STRATEGY_DEFINITIONS.keys())
+    else:
+        confidence_strategies = [s.strip() for s in args.confidence_strategies.split(",")]
+        invalid_strategies = [s for s in confidence_strategies if s not in CONFIDENCE_STRATEGY_DEFINITIONS]
+        if invalid_strategies:
+            all_strategies = list(CONFIDENCE_STRATEGY_DEFINITIONS.keys())
+            print(f"Warning: Unknown confidence strategies: {', '.join(invalid_strategies)}")
+            print(f"Available strategies: {', '.join(all_strategies)}")
+            return
 
     # Load examples from JSON file
     examples = load_examples_from_json(args.input_file)
