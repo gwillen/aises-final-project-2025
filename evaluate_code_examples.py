@@ -595,7 +595,7 @@ def evaluate_example(client, example: Dict[str, Any], model_name: str, provider:
         before_confidence_prompt = get_before_confidence_prompt(strategy, example['code'])
 
         # Query the model
-        before_confidence_response = query_model(client, before_confidence_prompt, model_name)
+        before_confidence_response = query_model(client, before_confidence_prompt, model_name, temperature=0.0)
 
         # Extract confidence using the appropriate function
         confidence = None
@@ -617,7 +617,7 @@ def evaluate_example(client, example: Dict[str, Any], model_name: str, provider:
     prompt = EVALUATION_PROMPT_TEMPLATE.format(code=example['code'])
     initial_eval_conversation: StandardConversation = [{"role": "user", "content": prompt}]
     # Get the full updated conversation including the model's first answer
-    eval_conversation = query_model_with_history(client, model_name, initial_eval_conversation[:])
+    eval_conversation = query_model_with_history(client, model_name, initial_eval_conversation[:], temperature=0.0)
 
     # Check if the evaluation API call was successful
     if len(eval_conversation) <= len(initial_eval_conversation):
@@ -643,7 +643,7 @@ def evaluate_example(client, example: Dict[str, Any], model_name: str, provider:
         current_conversation_for_after_query.append(after_prompt_message)
 
         # Pass the updated conversation history
-        final_conversation = query_model_with_history(client, model_name, current_conversation_for_after_query)
+        final_conversation = query_model_with_history(client, model_name, current_conversation_for_after_query, temperature=0.0)
 
         # Extract confidence using the appropriate function
         after_confidence = None
