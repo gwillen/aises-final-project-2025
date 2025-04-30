@@ -14,17 +14,13 @@ import argparse
 import re
 import sys
 from datetime import datetime
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Any
 
 # Import shared utilities
 from ai_utils import (
-    create_openai_client,
-    create_anthropic_client,
-    query_openai,
-    query_anthropic,
-    list_openai_models,
-    list_anthropic_models,
-    validate_model_name,
+    create_client,
+    query_model,
+    list_models,
     save_to_json
 )
 
@@ -148,37 +144,19 @@ def main():
     args = parser.parse_args()
 
     # Create the appropriate client based on provider
-    client = None
-    if args.provider == 'openai':
-        client = create_openai_client()
-        if not client:
-            return
+    client = create_client(args.provider)
+    if not client:
+        return
 
-        if args.list_models:
-            list_openai_models(client)
-            return
-
-    else:  # anthropic
-        client = create_anthropic_client()
-        if not client:
-            return
-
-        if args.list_models:
-            list_anthropic_models(client)
-            return
+    if args.list_models:
+        list_models(client)
+        return
 
     # Check if model is provided when not listing models
     if not args.model:
         print("Error: --model is required when not using --list-models")
         parser.print_help()
         return
-
-    # Validate model name
-    if not validate_model_name(args.provider, args.model):
-        print(f"Warning: '{args.model}' doesn't look like a standard {args.provider} model name.")
-        confirmation = input("Continue anyway? (y/n): ")
-        if confirmation.lower() != 'y':
-            return
 
     # If dry run, show what would be sent and exit
     if args.dry_run:
@@ -193,10 +171,7 @@ def main():
         return
 
     # Query the model
-    if args.provider == 'openai':
-        response = query_openai(client, args.prompt, args.model)
-    else:  # anthropic
-        response = query_anthropic(client, args.prompt, args.model)
+    response = query_model(client, args.prompt, args.model)
 
     if not response:
         print("No response received from the API")

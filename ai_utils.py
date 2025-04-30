@@ -6,14 +6,18 @@ Shared utilities for AI code example generation and evaluation.
 import os
 import json
 import re
-from typing import Dict, List, Optional, Any, Union
+from typing import Dict, List, Optional, Any, Union, TypedDict, Literal
 from datetime import datetime
 
 try:
     import dotenv
     from openai import OpenAI
     from anthropic import Anthropic
-    APIClient = Union[OpenAI, Anthropic]  # Type alias for clients
+    # Import specific response types for type hinting
+    from openai.types.chat import ChatCompletion
+    from anthropic.types import Message
+    APIClient = Union[OpenAI, Anthropic]
+    APIResponse = Union[ChatCompletion, Message] # Type alias for response objects
 except ImportError as e:
     print(f"Error importing required packages: {e}")
     print("Please install the required packages with: pip install openai anthropic python-dotenv")
@@ -22,6 +26,13 @@ except ImportError as e:
 
 # Load environment variables from .env file
 dotenv.load_dotenv()
+
+# --- Standard Conversation Types ---
+class StandardMessage(TypedDict):
+    role: Literal["system", "user", "assistant"]
+    content: str
+
+StandardConversation = List[StandardMessage]
 
 # --- Constants ---
 PROVIDER_OPENAI = "openai"
@@ -74,82 +85,133 @@ def create_anthropic_client() -> Optional[Anthropic]:
         return None
     return Anthropic(api_key=api_key)
 
-# --- Unified Query Function ---
+# --- Conversation Format Conversion Helpers ---
+
+def _convert_standard_to_openai_format(conversation: StandardConversation) -> List[Dict[str, str]]:
+    """Converts standard conversation format to OpenAI API format."""
+    # OpenAI format is identical to our standard format
+    return conversation
+
+def _convert_standard_to_anthropic_format(conversation: StandardConversation) -> tuple[Optional[str], List[Dict[str, str]]]:
+    """Converts standard conversation format to Anthropic API format (system prompt, messages)."""
+    system_prompt = None
+    messages = []
+    if conversation and conversation[0]['role'] == 'system':
+        system_prompt = conversation[0]['content']
+        messages = conversation[1:]
+    else:
+        messages = conversation
+    # Anthropic expects dicts, which StandardMessage already is
+    return system_prompt, messages
+
+def _extract_standard_response_message(response: Optional[APIResponse], client: APIClient) -> Optional[StandardMessage]:
+    """Extracts the assistant's response from the API result into StandardMessage format."""
+    if response is None:
+        return None
+
+    try:
+        if isinstance(client, OpenAI) and isinstance(response, ChatCompletion):
+            content = response.choices[0].message.content or ""
+            return {"role": "assistant", "content": content}
+        elif isinstance(client, Anthropic) and isinstance(response, Message):
+            if response.content and isinstance(response.content, list) and hasattr(response.content[0], 'text'):
+                return {"role": "assistant", "content": response.content[0].text}
+            else:
+                print(f"Warning: Unexpected Anthropic response structure: {response}")
+                return None # Or perhaps a message indicating an issue
+        else:
+            # This case indicates a type mismatch or unexpected response type
+            print(f"Warning: Mismatched client type ({type(client)}) and response type ({type(response)}) or unknown response type.")
+            return None
+    except (AttributeError, IndexError, KeyError, TypeError) as e:
+        print(f"Error extracting content from response object: {e}")
+        print(f"Response object: {response}")
+        return None
+
+# --- Unified Query Function with History (Refactored) ---
+def query_model_with_history(client: APIClient, model_name: str, conversation: StandardConversation) -> Optional[StandardMessage]:
+    """
+    Query the specified AI model provider with a given conversation history.
+    Appends the assistant's response to the conversation if successful.
+    Accepts and returns conversation in the standard format.
+
+    Args:
+        client: The API client (OpenAI or Anthropic).
+        model_name: The name of the model to use.
+        conversation: A list of StandardMessage dictionaries representing the history.
+
+    Returns:
+        The updated StandardConversation list including the assistant's response,
+        or the original conversation list if an error occurs or the response is empty.
+    """
+    try:
+        raw_response: Optional[APIResponse] = None
+        if isinstance(client, OpenAI):
+            openai_messages = _convert_standard_to_openai_format(conversation)
+            print(f"Querying OpenAI ({model_name}) with history ({len(openai_messages)} messages)")
+            raw_response = client.chat.completions.create(
+                model=model_name,
+                messages=openai_messages,
+                temperature=0.7, # Keep temperature consistent
+            )
+        elif isinstance(client, Anthropic):
+            system_prompt, anthropic_messages = _convert_standard_to_anthropic_format(conversation)
+            print(f"Querying Anthropic ({model_name}) with history ({len(anthropic_messages)} messages, system: {system_prompt is not None})")
+            raw_response = client.messages.create(
+                model=model_name,
+                max_tokens=1024, # Keep consistent
+                temperature=0.7, # Keep consistent
+                system=system_prompt, # Pass system prompt if exists
+                messages=anthropic_messages
+            )
+        else:
+            print(f"Error: Unknown client type: {type(client)}")
+            return conversation # Return original conversation on unknown client
+
+        # Convert the raw response back to the standard format
+        assistant_message = _extract_standard_response_message(raw_response, client)
+
+        # Append the message if successfully extracted
+        if assistant_message and assistant_message.get("content"): # Ensure content isn't empty
+            # Important: Create a copy to avoid modifying the original list passed by the caller if they reuse it
+            updated_conversation = conversation[:]
+            updated_conversation.append(assistant_message)
+            return updated_conversation
+        else:
+            print("Warning: Failed to extract valid assistant message from response.")
+            return conversation # Return original if response extraction failed
+
+    except Exception as e:
+        print(f"Error querying model with history: {e}")
+        return conversation # Return original conversation on API error
+
+# --- Unified Query Function (Refactored) ---
 
 def query_model(client: APIClient, prompt: str, model_name: str) -> str:
     """
-    Query the specified AI model provider with the given prompt.
+    Query the specified AI model provider with a single user prompt.
+    (Calls the history-based function internally).
 
     Args:
-        client: The API client (OpenAI or Anthropic)
-        prompt: The prompt to send
-        model_name: The name of the model to use
+        client: The API client (OpenAI or Anthropic).
+        prompt: The prompt to send.
+        model_name: The name of the model to use.
 
     Returns:
         The response text, or an empty string if an error occurs.
     """
-    if isinstance(client, OpenAI):
-        return query_openai(client, prompt, model_name)
-    elif isinstance(client, Anthropic):
-        return query_anthropic(client, prompt, model_name)
+    # Construct minimal conversation
+    initial_conversation: StandardConversation = [{"role": "user", "content": prompt}]
+    # Pass a copy in case the list is reused elsewhere, although unlikely here
+    updated_conversation = query_model_with_history(client, model_name, initial_conversation[:])
+
+    # Check if the conversation was actually updated (i.e., API call succeeded)
+    # and the last message is from the assistant
+    if len(updated_conversation) > len(initial_conversation) and updated_conversation[-1]["role"] == "assistant":
+        # Extract content from the last message (the assistant's response)
+        return updated_conversation[-1].get("content", "")
     else:
-        # This case should ideally not be reached if client is typed correctly
-        print(f"Error: Unknown client type: {type(client)}")
-        return ""
-
-def query_openai(client: OpenAI, prompt: str, model_name: str) -> str:
-    """
-    Query OpenAI API with the given prompt and model.
-
-    Args:
-        client: OpenAI client
-        prompt: The prompt to send
-        model_name: The name of the model to use (e.g., "gpt-4", "gpt-3.5-turbo")
-
-    Returns:
-        The response text
-    """
-    try:
-        print(f"Querying OpenAI with model: {model_name}")
-        response = client.chat.completions.create(
-            model=model_name,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.7, # Keep some temperature for evaluation to reflect typical use
-        )
-        return response.choices[0].message.content
-    except Exception as e:
-        print(f"Error querying OpenAI: {e}")
-        return ""
-
-def query_anthropic(client: Anthropic, prompt: str, model_name: str) -> str:
-    """
-    Query Anthropic API with the given prompt and model.
-
-    Args:
-        client: Anthropic client
-        prompt: The prompt to send
-        model_name: The name of the model to use (e.g., "claude-3-opus-20240229")
-
-    Returns:
-        The response text
-    """
-    try:
-        print(f"Querying Anthropic with model: {model_name}")
-        response = client.messages.create(
-            model=model_name,
-            max_tokens=1024, # Lower for evaluation responses which should be shorter
-            temperature=0.7, # Keep some temperature for evaluation to reflect typical use
-            messages=[{"role": "user", "content": prompt}]
-        )
-        # Handle potential differences in response structure if needed
-        if response.content and isinstance(response.content, list) and hasattr(response.content[0], 'text'):
-            return response.content[0].text
-        else:
-            # Log unexpected structure for debugging
-            print(f"Warning: Unexpected Anthropic response structure: {response}")
-            return "" # Or handle appropriately
-    except Exception as e:
-        print(f"Error querying Anthropic: {e}")
+        # API call or response extraction likely failed, return empty string
         return ""
 
 # --- Unified Model Listing ---
