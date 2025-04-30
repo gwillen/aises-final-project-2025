@@ -42,8 +42,15 @@ What does this program output? Please provide only your best immediate guess at 
 CONFIDENCE_PROMPTS = {
     "standard": {
         "description": "Standard probability estimation (0-100% or 0-1)",
-        "template": """
+        "before_template": """
 In a moment, I will ask you what this program outputs. You will have to provide only your best immediate guess at the final answer, without reasoning, analysis, or commentary. Before I do that, first I want to evaluate your confidence that you can answer correctly. Please give me an estimate of your probability that your answer will be correct. Again, please give only the estimate, on a line by itself, without reasoning, analysis, or commentary.
+
+```
+{code}
+```
+""",
+        "after_template": """
+You just gave an answer for the program output. Now, please give me an estimate of your probability that your answer is correct. Again, please give only the estimate, on a line by itself, without reasoning, analysis, or commentary.
 
 ```
 {code}
@@ -53,8 +60,15 @@ In a moment, I will ask you what this program outputs. You will have to provide 
     },
     "inverse": {
         "description": "Ask for 1/p formulation: number of examples to get one wrong",
-        "template": """
+        "before_template": """
 In a moment, I will ask you what this program outputs. You will have to provide only your best immediate guess at the final answer, without reasoning, analysis, or commentary. Before I do that, first I want to evaluate your confidence that you can answer correctly. Please give me an estimate of the probability p that your answer is correct, written as 1/p: the number of similar examples you would expect to solve, in order to get one wrong, on average. Again, please give only the estimate, on a line by itself, without reasoning, analysis, or commentary.
+
+```
+{code}
+```
+""",
+        "after_template": """
+You just gave an answer for the program output. Now, please give me an estimate of the probability p that your answer is correct, written as 1/p: the number of similar examples you would expect to solve, in order to get one wrong, on average. Again, please give only the estimate, on a line by itself, without reasoning, analysis, or commentary.
 
 ```
 {code}
@@ -389,36 +403,111 @@ def save_multiple_evaluations_to_json(evaluations: List[Dict[str, Any]], model_n
     confidence_stats = {}
     for strategy in all_strategies:
         strategy_data = {
-            "total_confidence": 0,
-            "valid_count": 0,
-            "avg_confidence": None,
-            "correct_confidences": [],
-            "incorrect_confidences": [],
-            "avg_confidence_when_correct": None,
-            "avg_confidence_when_incorrect": None
+            "before_total_confidence": 0,
+            "before_valid_count": 0,
+            "before_avg_confidence": None,
+            "after_total_confidence": 0,
+            "after_valid_count": 0,
+            "after_avg_confidence": None,
+            "before_correct_confidences": [],
+            "before_incorrect_confidences": [],
+            "after_correct_confidences": [],
+            "after_incorrect_confidences": [],
+            "before_avg_confidence_when_correct": None,
+            "before_avg_confidence_when_incorrect": None,
+            "after_avg_confidence_when_correct": None,
+            "after_avg_confidence_when_incorrect": None,
+            "avg_confidence_change": None,
+            "avg_confidence_change_when_correct": None,
+            "avg_confidence_change_when_incorrect": None,
+            "confidence_changes_by_result": {
+                "increased": 0,
+                "decreased": 0,
+                "unchanged": 0
+            }
         }
 
         for eval in evaluations:
             if "confidence_results" in eval and strategy in eval["confidence_results"]:
-                confidence = eval["confidence_results"][strategy].get("confidence")
-                if confidence is not None:
-                    strategy_data["total_confidence"] += confidence
-                    strategy_data["valid_count"] += 1
+                before_confidence = eval["confidence_results"][strategy].get("before_confidence")
+                after_confidence = eval["confidence_results"][strategy].get("after_confidence")
+
+                # Track before confidence
+                if before_confidence is not None:
+                    strategy_data["before_total_confidence"] += before_confidence
+                    strategy_data["before_valid_count"] += 1
 
                     if eval.get("match", False):
-                        strategy_data["correct_confidences"].append(confidence)
+                        strategy_data["before_correct_confidences"].append(before_confidence)
                     else:
-                        strategy_data["incorrect_confidences"].append(confidence)
+                        strategy_data["before_incorrect_confidences"].append(before_confidence)
+
+                # Track after confidence
+                if after_confidence is not None:
+                    strategy_data["after_total_confidence"] += after_confidence
+                    strategy_data["after_valid_count"] += 1
+
+                    if eval.get("match", False):
+                        strategy_data["after_correct_confidences"].append(after_confidence)
+                    else:
+                        strategy_data["after_incorrect_confidences"].append(after_confidence)
+
+                # Track confidence changes
+                if before_confidence is not None and after_confidence is not None:
+                    change = after_confidence - before_confidence
+                    if change > 0:
+                        strategy_data["confidence_changes_by_result"]["increased"] += 1
+                    elif change < 0:
+                        strategy_data["confidence_changes_by_result"]["decreased"] += 1
+                    else:
+                        strategy_data["confidence_changes_by_result"]["unchanged"] += 1
 
         # Calculate averages
-        if strategy_data["valid_count"] > 0:
-            strategy_data["avg_confidence"] = strategy_data["total_confidence"] / strategy_data["valid_count"]
+        if strategy_data["before_valid_count"] > 0:
+            strategy_data["before_avg_confidence"] = strategy_data["before_total_confidence"] / strategy_data["before_valid_count"]
 
-        if strategy_data["correct_confidences"]:
-            strategy_data["avg_confidence_when_correct"] = sum(strategy_data["correct_confidences"]) / len(strategy_data["correct_confidences"])
+        if strategy_data["after_valid_count"] > 0:
+            strategy_data["after_avg_confidence"] = strategy_data["after_total_confidence"] / strategy_data["after_valid_count"]
 
-        if strategy_data["incorrect_confidences"]:
-            strategy_data["avg_confidence_when_incorrect"] = sum(strategy_data["incorrect_confidences"]) / len(strategy_data["incorrect_confidences"])
+        if strategy_data["before_correct_confidences"]:
+            strategy_data["before_avg_confidence_when_correct"] = sum(strategy_data["before_correct_confidences"]) / len(strategy_data["before_correct_confidences"])
+
+        if strategy_data["before_incorrect_confidences"]:
+            strategy_data["before_avg_confidence_when_incorrect"] = sum(strategy_data["before_incorrect_confidences"]) / len(strategy_data["before_incorrect_confidences"])
+
+        if strategy_data["after_correct_confidences"]:
+            strategy_data["after_avg_confidence_when_correct"] = sum(strategy_data["after_correct_confidences"]) / len(strategy_data["after_correct_confidences"])
+
+        if strategy_data["after_incorrect_confidences"]:
+            strategy_data["after_avg_confidence_when_incorrect"] = sum(strategy_data["after_incorrect_confidences"]) / len(strategy_data["after_incorrect_confidences"])
+
+        # Calculate average confidence change
+        confidence_changes = []
+        correct_confidence_changes = []
+        incorrect_confidence_changes = []
+
+        for eval in evaluations:
+            if "confidence_results" in eval and strategy in eval["confidence_results"]:
+                before_confidence = eval["confidence_results"][strategy].get("before_confidence")
+                after_confidence = eval["confidence_results"][strategy].get("after_confidence")
+
+                if before_confidence is not None and after_confidence is not None:
+                    change = after_confidence - before_confidence
+                    confidence_changes.append(change)
+
+                    if eval.get("match", False):
+                        correct_confidence_changes.append(change)
+                    else:
+                        incorrect_confidence_changes.append(change)
+
+        if confidence_changes:
+            strategy_data["avg_confidence_change"] = sum(confidence_changes) / len(confidence_changes)
+
+        if correct_confidence_changes:
+            strategy_data["avg_confidence_change_when_correct"] = sum(correct_confidence_changes) / len(correct_confidence_changes)
+
+        if incorrect_confidence_changes:
+            strategy_data["avg_confidence_change_when_incorrect"] = sum(incorrect_confidence_changes) / len(incorrect_confidence_changes)
 
         confidence_stats[strategy] = strategy_data
 
@@ -443,9 +532,12 @@ def save_multiple_evaluations_to_json(evaluations: List[Dict[str, Any]], model_n
             # Initialize confidence data for each strategy
             for strategy in all_strategies:
                 by_language[lang]["by_confidence_strategy"][strategy] = {
-                    "total_confidence": 0,
-                    "valid_count": 0,
-                    "avg_confidence": None
+                    "before_total_confidence": 0,
+                    "before_valid_count": 0,
+                    "before_avg_confidence": None,
+                    "after_total_confidence": 0,
+                    "after_valid_count": 0,
+                    "after_avg_confidence": None
                 }
 
         by_language[lang]["total"] += 1
@@ -453,10 +545,16 @@ def save_multiple_evaluations_to_json(evaluations: List[Dict[str, Any]], model_n
         # Update confidence data for each strategy
         for strategy in all_strategies:
             if "confidence_results" in eval and strategy in eval["confidence_results"]:
-                confidence = eval["confidence_results"][strategy].get("confidence")
-                if confidence is not None:
-                    by_language[lang]["by_confidence_strategy"][strategy]["total_confidence"] += confidence
-                    by_language[lang]["by_confidence_strategy"][strategy]["valid_count"] += 1
+                before_confidence = eval["confidence_results"][strategy].get("before_confidence")
+                after_confidence = eval["confidence_results"][strategy].get("after_confidence")
+
+                if before_confidence is not None:
+                    by_language[lang]["by_confidence_strategy"][strategy]["before_total_confidence"] += before_confidence
+                    by_language[lang]["by_confidence_strategy"][strategy]["before_valid_count"] += 1
+
+                if after_confidence is not None:
+                    by_language[lang]["by_confidence_strategy"][strategy]["after_total_confidence"] += after_confidence
+                    by_language[lang]["by_confidence_strategy"][strategy]["after_valid_count"] += 1
 
         if eval.get("match", False):
             by_language[lang]["matches"] += 1
@@ -472,9 +570,12 @@ def save_multiple_evaluations_to_json(evaluations: List[Dict[str, Any]], model_n
             # Initialize confidence data for each strategy
             for strategy in all_strategies:
                 by_language[lang]["by_difficulty"][difficulty]["by_confidence_strategy"][strategy] = {
-                    "total_confidence": 0,
-                    "valid_count": 0,
-                    "avg_confidence": None
+                    "before_total_confidence": 0,
+                    "before_valid_count": 0,
+                    "before_avg_confidence": None,
+                    "after_total_confidence": 0,
+                    "after_valid_count": 0,
+                    "after_avg_confidence": None
                 }
 
         by_language[lang]["by_difficulty"][difficulty]["total"] += 1
@@ -482,10 +583,16 @@ def save_multiple_evaluations_to_json(evaluations: List[Dict[str, Any]], model_n
         # Update confidence data for difficulty level and strategy
         for strategy in all_strategies:
             if "confidence_results" in eval and strategy in eval["confidence_results"]:
-                confidence = eval["confidence_results"][strategy].get("confidence")
-                if confidence is not None:
-                    by_language[lang]["by_difficulty"][difficulty]["by_confidence_strategy"][strategy]["total_confidence"] += confidence
-                    by_language[lang]["by_difficulty"][difficulty]["by_confidence_strategy"][strategy]["valid_count"] += 1
+                before_confidence = eval["confidence_results"][strategy].get("before_confidence")
+                after_confidence = eval["confidence_results"][strategy].get("after_confidence")
+
+                if before_confidence is not None:
+                    by_language[lang]["by_difficulty"][difficulty]["by_confidence_strategy"][strategy]["before_total_confidence"] += before_confidence
+                    by_language[lang]["by_difficulty"][difficulty]["by_confidence_strategy"][strategy]["before_valid_count"] += 1
+
+                if after_confidence is not None:
+                    by_language[lang]["by_difficulty"][difficulty]["by_confidence_strategy"][strategy]["after_total_confidence"] += after_confidence
+                    by_language[lang]["by_difficulty"][difficulty]["by_confidence_strategy"][strategy]["after_valid_count"] += 1
 
         if eval.get("match", False):
             by_language[lang]["by_difficulty"][difficulty]["matches"] += 1
@@ -501,9 +608,12 @@ def save_multiple_evaluations_to_json(evaluations: List[Dict[str, Any]], model_n
             # Initialize confidence data for each strategy
             for strategy in all_strategies:
                 by_difficulty[difficulty]["by_confidence_strategy"][strategy] = {
-                    "total_confidence": 0,
-                    "valid_count": 0,
-                    "avg_confidence": None
+                    "before_total_confidence": 0,
+                    "before_valid_count": 0,
+                    "before_avg_confidence": None,
+                    "after_total_confidence": 0,
+                    "after_valid_count": 0,
+                    "after_avg_confidence": None
                 }
 
         by_difficulty[difficulty]["total"] += 1
@@ -511,10 +621,16 @@ def save_multiple_evaluations_to_json(evaluations: List[Dict[str, Any]], model_n
         # Update confidence data for each strategy
         for strategy in all_strategies:
             if "confidence_results" in eval and strategy in eval["confidence_results"]:
-                confidence = eval["confidence_results"][strategy].get("confidence")
-                if confidence is not None:
-                    by_difficulty[difficulty]["by_confidence_strategy"][strategy]["total_confidence"] += confidence
-                    by_difficulty[difficulty]["by_confidence_strategy"][strategy]["valid_count"] += 1
+                before_confidence = eval["confidence_results"][strategy].get("before_confidence")
+                after_confidence = eval["confidence_results"][strategy].get("after_confidence")
+
+                if before_confidence is not None:
+                    by_difficulty[difficulty]["by_confidence_strategy"][strategy]["before_total_confidence"] += before_confidence
+                    by_difficulty[difficulty]["by_confidence_strategy"][strategy]["before_valid_count"] += 1
+
+                if after_confidence is not None:
+                    by_difficulty[difficulty]["by_confidence_strategy"][strategy]["after_total_confidence"] += after_confidence
+                    by_difficulty[difficulty]["by_confidence_strategy"][strategy]["after_valid_count"] += 1
 
         if eval.get("match", False):
             by_difficulty[difficulty]["matches"] += 1
@@ -523,20 +639,26 @@ def save_multiple_evaluations_to_json(evaluations: List[Dict[str, Any]], model_n
     for lang in by_language:
         for strategy in all_strategies:
             strategy_data = by_language[lang]["by_confidence_strategy"][strategy]
-            if strategy_data["valid_count"] > 0:
-                strategy_data["avg_confidence"] = strategy_data["total_confidence"] / strategy_data["valid_count"]
+            if strategy_data["before_valid_count"] > 0:
+                strategy_data["before_avg_confidence"] = strategy_data["before_total_confidence"] / strategy_data["before_valid_count"]
+            if strategy_data["after_valid_count"] > 0:
+                strategy_data["after_avg_confidence"] = strategy_data["after_total_confidence"] / strategy_data["after_valid_count"]
 
         for diff in by_language[lang]["by_difficulty"]:
             for strategy in all_strategies:
                 strategy_data = by_language[lang]["by_difficulty"][diff]["by_confidence_strategy"][strategy]
-                if strategy_data["valid_count"] > 0:
-                    strategy_data["avg_confidence"] = strategy_data["total_confidence"] / strategy_data["valid_count"]
+                if strategy_data["before_valid_count"] > 0:
+                    strategy_data["before_avg_confidence"] = strategy_data["before_total_confidence"] / strategy_data["before_valid_count"]
+                if strategy_data["after_valid_count"] > 0:
+                    strategy_data["after_avg_confidence"] = strategy_data["after_total_confidence"] / strategy_data["after_valid_count"]
 
     for diff in by_difficulty:
         for strategy in all_strategies:
             strategy_data = by_difficulty[diff]["by_confidence_strategy"][strategy]
-            if strategy_data["valid_count"] > 0:
-                strategy_data["avg_confidence"] = strategy_data["total_confidence"] / strategy_data["valid_count"]
+            if strategy_data["before_valid_count"] > 0:
+                strategy_data["before_avg_confidence"] = strategy_data["before_total_confidence"] / strategy_data["before_valid_count"]
+            if strategy_data["after_valid_count"] > 0:
+                strategy_data["after_avg_confidence"] = strategy_data["after_total_confidence"] / strategy_data["after_valid_count"]
 
     data = {
         "timestamp": timestamp,
@@ -583,10 +705,10 @@ def evaluate_example(client, example: Dict[str, Any], model_name: str, provider:
     # Dictionary to hold confidence results
     confidence_results = {}
 
-    # Evaluate confidence for each strategy
+    # Evaluate "before" confidence for each strategy
     for strategy in confidence_strategies:
         # Get the prompt template for this strategy
-        confidence_prompt = CONFIDENCE_PROMPTS[strategy]["template"].format(code=example['code'])
+        confidence_prompt = CONFIDENCE_PROMPTS[strategy]["before_template"].format(code=example['code'])
 
         # Query the model
         if provider == 'openai':
@@ -601,9 +723,12 @@ def evaluate_example(client, example: Dict[str, Any], model_name: str, provider:
 
         # Store results
         confidence_results[strategy] = {
-            "prompt": confidence_prompt,
-            "response": confidence_response,
-            "confidence": confidence
+            "before_prompt": confidence_prompt,
+            "before_response": confidence_response,
+            "before_confidence": confidence,
+            "after_prompt": None,
+            "after_response": None,
+            "after_confidence": None
         }
 
     # Now evaluate the actual example
@@ -622,6 +747,27 @@ def evaluate_example(client, example: Dict[str, Any], model_name: str, provider:
     extracted_answer = extract_final_answer(response)
     expected_answer = example.get('verified_answer', example.get('answer', ''))
 
+    # Evaluate "after" confidence for each strategy now that we have the answer
+    for strategy in confidence_strategies:
+        # Get the prompt template for this strategy
+        confidence_prompt = CONFIDENCE_PROMPTS[strategy]["after_template"].format(code=example['code'])
+
+        # Query the model
+        if provider == 'openai':
+            confidence_response = query_openai(client, confidence_prompt, model_name)
+        else:  # anthropic
+            confidence_response = query_anthropic(client, confidence_prompt, model_name)
+
+        # Extract confidence using the appropriate function
+        after_confidence = None
+        if confidence_response:
+            after_confidence = extract_confidence(confidence_response, strategy)
+
+        # Store results
+        confidence_results[strategy]["after_prompt"] = confidence_prompt
+        confidence_results[strategy]["after_response"] = confidence_response
+        confidence_results[strategy]["after_confidence"] = after_confidence
+
     # Create evaluation result with combined confidence data
     result = {
         "example": example,
@@ -636,7 +782,9 @@ def evaluate_example(client, example: Dict[str, Any], model_name: str, provider:
 
     # Add first confidence as the primary one for backward compatibility
     primary_strategy = confidence_strategies[0]
-    result["confidence"] = confidence_results[primary_strategy]["confidence"]
+    result["before_confidence"] = confidence_results[primary_strategy]["before_confidence"]
+    result["after_confidence"] = confidence_results[primary_strategy]["after_confidence"]
+    result["confidence"] = result["before_confidence"]  # Keep for backward compatibility
 
     return result
 
@@ -760,8 +908,11 @@ def main():
                         valid_confidence_count[strategy] += 1
 
                 # Use primary confidence for display
-                primary_confidence = evaluation.get("confidence")
-                confidence_display = f" (confidence: {primary_confidence:.2f})" if primary_confidence is not None else ""
+                before_confidence = evaluation.get("before_confidence")
+                after_confidence = evaluation.get("after_confidence")
+                before_display = f" (before: {before_confidence:.2f})" if before_confidence is not None else ""
+                after_display = f" (after: {after_confidence:.2f})" if after_confidence is not None else ""
+                confidence_display = f"{before_display}{after_display}"
 
                 if evaluation["match"]:
                     result = "✓ CORRECT"
@@ -776,9 +927,11 @@ def main():
                 # Show all confidence values if there are multiple strategies
                 if len(confidence_strategies) > 1:
                     for strategy in confidence_strategies:
-                        conf = evaluation["confidence_results"][strategy]["confidence"]
-                        if conf is not None:
-                            print(f"  {strategy} confidence: {conf:.2f}")
+                        before_conf = evaluation["confidence_results"][strategy]["before_confidence"]
+                        after_conf = evaluation["confidence_results"][strategy]["after_confidence"]
+                        before_str = f"{before_conf:.2f}" if before_conf is not None else "N/A"
+                        after_str = f"{after_conf:.2f}" if after_conf is not None else "N/A"
+                        print(f"  {strategy} confidence: before={before_str}, after={after_str}")
             else:
                 print(" ERROR")
 
@@ -823,7 +976,7 @@ def main():
         for i, strategy in enumerate(confidence_strategies):
             print(f"\n=== Confidence Prompt {i+1}: {strategy} ===")
             print("=" * 40)
-            print(CONFIDENCE_PROMPTS[strategy]["template"].format(code=example['code']))
+            print(CONFIDENCE_PROMPTS[strategy]["before_template"].format(code=example['code']))
             print("=" * 40)
 
         # Show evaluation prompt
@@ -852,9 +1005,17 @@ def main():
     # Print confidence results for each strategy
     print("\nConfidence Estimates:")
     for strategy in confidence_strategies:
-        confidence = evaluation["confidence_results"][strategy]["confidence"]
-        confidence_str = f"{confidence:.2f}" if confidence is not None else "Unable to extract"
-        print(f"  {strategy}: {confidence_str}")
+        before_confidence = evaluation["confidence_results"][strategy]["before_confidence"]
+        after_confidence = evaluation["confidence_results"][strategy]["after_confidence"]
+        before_str = f"{before_confidence:.2f}" if before_confidence is not None else "Unable to extract"
+        after_str = f"{after_confidence:.2f}" if after_confidence is not None else "Unable to extract"
+        print(f"  {strategy}: before={before_str}, after={after_str}")
+
+        # Show confidence change
+        if before_confidence is not None and after_confidence is not None:
+            change = after_confidence - before_confidence
+            direction = "increased" if change > 0 else "decreased" if change < 0 else "unchanged"
+            print(f"    Change: {direction} by {abs(change):.2f}")
 
     # Save to JSON
     filename = save_single_evaluation_with_confidence(evaluation, args.model, args.provider)
