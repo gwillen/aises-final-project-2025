@@ -49,10 +49,11 @@ PROMPT_BEFORE_PREFIX = "In a moment, I will ask you what this code outputs or re
 
 PROMPT_STRATEGY_REQUESTS = {
     "standard": "Please give me an estimate of the probability that your " \
-        "answer is correct, written as a number between 0 and 1.",
+        "answer is correct, written as a percentage between 0 and 100.",
     "inverse": "Please give me an estimate of the number of similar problems " \
-        "you would expect to attempt, on average, before getting one wrong. " \
-        "(This equals 1/(1-p), where p is the probability of success.)",
+        "you would expect to attempt, on average, before getting one wrong. ",
+    "betting": "You have $1000 of play money. How much of it will you bet " \
+        "that your answer is correct? Please give a number between 0 and 1000.",
     "verbal": "Please describe in words how confident you are that your " \
         "answer is correct."
 }
