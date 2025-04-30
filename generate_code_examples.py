@@ -14,12 +14,13 @@ import argparse
 import re
 import sys
 from datetime import datetime
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 
 # Import shared utilities
 from ai_utils import (
     create_client,
     query_model,
+    query_model_with_history,
     list_models,
     save_to_json
 )
@@ -99,16 +100,30 @@ def parse_examples(response_text: str) -> List[Dict[str, Any]]:
 
     return examples
 
-def save_examples_to_json(prompt: str, response: str, examples: List[Dict[str, Any]], model_name: str, provider: str) -> str:
+def save_examples_to_json(
+    prompt: str,
+    raw_responses: List[str],
+    all_examples: List[Dict[str, Any]],
+    model_name: str,
+    provider: str,
+    temperature: Optional[float],
+    target_examples: int,
+    max_queries: int,
+    num_queries_made: int
+) -> str:
     """
     Save the prompt, response, and parsed examples to a JSON file.
 
     Args:
         prompt: The original prompt
-        response: The raw response from the AI
-        examples: The parsed examples
+        raw_responses: List of raw responses from each API query
+        all_examples: The aggregated list of parsed examples
         model_name: The name of the model used
         provider: The API provider (OpenAI or Anthropic)
+        temperature: The temperature setting used for generation
+        target_examples: The target number of examples requested
+        max_queries: The maximum number of queries allowed
+        num_queries_made: The actual number of queries performed
 
     Returns:
         The path to the saved JSON file
@@ -117,10 +132,16 @@ def save_examples_to_json(prompt: str, response: str, examples: List[Dict[str, A
         "timestamp": datetime.now().strftime("%Y%m%d_%H%M%S"),
         "provider": provider,
         "model": model_name,
-        "prompt": prompt,
-        "response": response,
-        "examples": examples,
-        "example_count": len(examples)
+        "generation_parameters": {
+            "prompt": prompt,
+            "temperature": temperature,
+            "target_examples": target_examples,
+            "max_queries": max_queries,
+            "num_queries_made": num_queries_made
+        },
+        "raw_responses": raw_responses,
+        "examples": all_examples,
+        "final_example_count": len(all_examples)
     }
 
     # Save to the output/examples directory
@@ -136,6 +157,12 @@ def main():
                         help='Model name to use (e.g., gpt-4 for OpenAI, claude-3-opus-20240229 for Anthropic)')
     parser.add_argument('--prompt', type=str, default=DEFAULT_PROMPT,
                         help='Custom prompt to use (defaults to the predefined prompt)')
+    parser.add_argument('--target-examples', type=int, default=10,
+                        help='Target number of examples to generate (default: 10)')
+    parser.add_argument('--max-queries', type=int, default=5,
+                        help='Maximum number of API queries allowed (default: 5)')
+    parser.add_argument('--temperature', type=float, default=0.8,
+                        help='Sampling temperature for generation (e.g., 0.7, 1.0). Default: 0.8')
     parser.add_argument('--list-models', action='store_true',
                         help='List available models from the specified provider and exit')
     parser.add_argument('--dry-run', action='store_true',
@@ -151,6 +178,10 @@ def main():
     if args.list_models:
         list_models(client)
         return
+
+    # Validate temperature range if needed (e.g., 0.0 to 2.0)
+    if not (0.0 <= args.temperature <= 2.0):
+        print(f"Warning: Temperature {args.temperature} is outside the typical range [0.0, 2.0].")
 
     # Check if model is provided when not listing models
     if not args.model:
@@ -170,33 +201,77 @@ def main():
         print("\nNo API call will be made. Exiting.")
         return
 
-    # Query the model
-    response = query_model(client, args.prompt, args.model)
+    # --- Iterative Generation Loop ---
+    all_examples = []
+    raw_responses_list = []
+    query_count = 0
 
-    if not response:
-        print("No response received from the API")
-        return
+    print(f"Attempting to generate {args.target_examples} examples (max queries: {args.max_queries}, temp: {args.temperature})...")
 
-    # Parse examples from the response
-    examples = parse_examples(response)
+    while len(all_examples) < args.target_examples and query_count < args.max_queries:
+        query_count += 1
+        print(f"\n--- Query {query_count}/{args.max_queries} --- (Current examples: {len(all_examples)}/{args.target_examples})")
 
-    if not examples:
-        print("Warning: No examples were found in the response. The parsing may have failed.")
-        print("Check if the response follows the expected format:")
-        print("LANGUAGE: ...\nDIFFICULTY: ...\nCODE: ...\nANSWER: ...")
-        save_anyway = input("Save the response anyway? (y/n): ")
-        if save_anyway.lower() != 'y':
-            return
+        # Query the model with specified temperature
+        response = query_model(
+            client,
+            args.prompt,
+            args.model,
+            temperature=args.temperature
+        )
+
+        if not response:
+            print("No response received from the API for this query.")
+            # Optionally break or continue depending on desired behavior on failure
+            continue # Let's continue to allow other queries
+
+        raw_responses_list.append(response)
+
+        # Parse examples from the response
+        new_examples = parse_examples(response)
+
+        if not new_examples:
+            print("Warning: No examples parsed from this query's response.")
+        else:
+            print(f"Parsed {len(new_examples)} new examples from this query.")
+            all_examples.extend(new_examples)
+
+        # Optional: Add a small delay between queries if needed
+        # import time
+        # time.sleep(1)
+
+    print(f"\nFinished generation after {query_count} queries.")
+
+    # --- Final Check and Save ---
+    if not all_examples:
+        print("Warning: No examples were generated or parsed successfully.")
+        if raw_responses_list:
+             print("Saving the raw responses anyway.")
+        else:
+             return # Nothing to save
 
     # Save to JSON
-    filename = save_examples_to_json(args.prompt, response, examples, args.model, args.provider)
+    filename = save_examples_to_json(
+        args.prompt,
+        raw_responses_list,
+        all_examples,
+        args.model,
+        args.provider,
+        args.temperature,
+        args.target_examples,
+        args.max_queries,
+        query_count
+    )
 
-    print(f"Generated {len(examples)} examples")
-    if examples:
-        languages = set(example['language'] for example in examples)
-        difficulties = [example['difficulty'] for example in examples]
-        print(f"Languages: {', '.join(languages)}")
-        print(f"Difficulty range: {min(difficulties)} to {max(difficulties)}")
+    print(f"\nTotal generated examples: {len(all_examples)}")
+    if all_examples:
+        languages = set(example['language'] for example in all_examples)
+        difficulties = [example['difficulty'] for example in all_examples]
+        print(f"Languages represented: {', '.join(sorted(list(languages)))}")
+        try:
+            print(f"Difficulty range: {min(difficulties)} to {max(difficulties)}")
+        except ValueError: # Handle case where difficulties list might be empty if parsing failed somehow
+            print("Could not determine difficulty range.")
 
 if __name__ == "__main__":
     main()
