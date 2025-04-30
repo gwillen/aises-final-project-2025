@@ -647,7 +647,7 @@ def evaluate_example(client, example: Dict[str, Any], model_name: str, provider:
     Evaluate a single example and return the evaluation results.
 
     Args:
-        client: The API client to use
+        client: The API client to use (OpenAI or Anthropic)
         example: The example to evaluate
         model_name: The name of the model to use
         provider: The API provider (OpenAI or Anthropic)
@@ -674,7 +674,7 @@ def evaluate_example(client, example: Dict[str, Any], model_name: str, provider:
         confidence_prompt = CONFIDENCE_PROMPTS[strategy]["before_template"].format(code=example['code'])
 
         # Query the model
-        confidence_response = query_model(client, provider, confidence_prompt, model_name)
+        confidence_response = query_model(client, confidence_prompt, model_name)
 
         # Extract confidence using the appropriate function
         confidence = None
@@ -694,7 +694,7 @@ def evaluate_example(client, example: Dict[str, Any], model_name: str, provider:
     # Now evaluate the actual example
     prompt = EVALUATION_PROMPT_TEMPLATE.format(code=example['code'])
 
-    response = query_model(client, provider, prompt, model_name)
+    response = query_model(client, prompt, model_name)
 
     if not response:
         print(f"No response received from the API for example: {example.get('language', 'Unknown')} difficulty {example.get('difficulty', '?')}")
@@ -710,7 +710,7 @@ def evaluate_example(client, example: Dict[str, Any], model_name: str, provider:
         confidence_prompt = CONFIDENCE_PROMPTS[strategy]["after_template"].format(code=example['code'])
 
         # Query the model
-        confidence_response = query_model(client, provider, confidence_prompt, model_name)
+        confidence_response = query_model(client, confidence_prompt, model_name)
 
         # Extract confidence using the appropriate function
         after_confidence = None
@@ -779,7 +779,7 @@ def main():
         return
 
     if args.list_models:
-        list_models(client, args.provider)
+        list_models(client)
         return
 
     # Check if model is provided when not listing models

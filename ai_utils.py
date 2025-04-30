@@ -76,31 +76,25 @@ def create_anthropic_client() -> Optional[Anthropic]:
 
 # --- Unified Query Function ---
 
-def query_model(client: APIClient, provider: str, prompt: str, model_name: str) -> str:
+def query_model(client: APIClient, prompt: str, model_name: str) -> str:
     """
     Query the specified AI model provider with the given prompt.
 
     Args:
         client: The API client (OpenAI or Anthropic)
-        provider: The API provider ("openai" or "anthropic")
         prompt: The prompt to send
         model_name: The name of the model to use
 
     Returns:
         The response text, or an empty string if an error occurs.
     """
-    if provider == PROVIDER_OPENAI:
-        if not isinstance(client, OpenAI):
-            print("Error: Incorrect client type provided for OpenAI.")
-            return ""
+    if isinstance(client, OpenAI):
         return query_openai(client, prompt, model_name)
-    elif provider == PROVIDER_ANTHROPIC:
-        if not isinstance(client, Anthropic):
-            print("Error: Incorrect client type provided for Anthropic.")
-            return ""
+    elif isinstance(client, Anthropic):
         return query_anthropic(client, prompt, model_name)
     else:
-        print(f"Error: Invalid provider specified: {provider}")
+        # This case should ideally not be reached if client is typed correctly
+        print(f"Error: Unknown client type: {type(client)}")
         return ""
 
 def query_openai(client: OpenAI, prompt: str, model_name: str) -> str:
@@ -160,26 +154,20 @@ def query_anthropic(client: Anthropic, prompt: str, model_name: str) -> str:
 
 # --- Unified Model Listing ---
 
-def list_models(client: APIClient, provider: str) -> None:
+def list_models(client: APIClient) -> None:
     """
     List available models for the specified provider.
 
     Args:
         client: The API client (OpenAI or Anthropic)
-        provider: The API provider ("openai" or "anthropic")
     """
-    if provider == PROVIDER_OPENAI:
-        if not isinstance(client, OpenAI):
-            print("Error: Incorrect client type provided for OpenAI.")
-            return
+    if isinstance(client, OpenAI):
         list_openai_models(client)
-    elif provider == PROVIDER_ANTHROPIC:
-        if not isinstance(client, Anthropic):
-            print("Error: Incorrect client type provided for Anthropic.")
-            return
+    elif isinstance(client, Anthropic):
         list_anthropic_models(client)
     else:
-        print(f"Error: Invalid provider specified: {provider}")
+        # This case should ideally not be reached if client is typed correctly
+        print(f"Error: Unknown client type: {type(client)}")
 
 
 def list_openai_models(client: OpenAI) -> None:
