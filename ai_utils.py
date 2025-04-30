@@ -6,13 +6,14 @@ Shared utilities for AI code example generation and evaluation.
 import os
 import json
 import re
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Union
 from datetime import datetime
 
 try:
     import dotenv
     from openai import OpenAI
     from anthropic import Anthropic
+    APIClient = Union[OpenAI, Anthropic]  # Type alias for clients
 except ImportError as e:
     print(f"Error importing required packages: {e}")
     print("Please install the required packages with: pip install openai anthropic python-dotenv")
@@ -21,6 +22,11 @@ except ImportError as e:
 
 # Load environment variables from .env file
 dotenv.load_dotenv()
+
+# --- Constants ---
+PROVIDER_OPENAI = "openai"
+PROVIDER_ANTHROPIC = "anthropic"
+
 
 def ensure_output_directory(directory_path: str) -> None:
     """
@@ -31,6 +37,26 @@ def ensure_output_directory(directory_path: str) -> None:
     """
     os.makedirs(directory_path, exist_ok=True)
     print(f"Output directory ensured: {directory_path}")
+
+# --- Unified Client Creation ---
+
+def create_client(provider: str) -> Optional[APIClient]:
+    """
+    Create and return an API client for the specified provider.
+
+    Args:
+        provider: The API provider ("openai" or "anthropic")
+
+    Returns:
+        An OpenAI or Anthropic client, or None if the API key is missing or provider is invalid.
+    """
+    if provider == PROVIDER_OPENAI:
+        return create_openai_client()
+    elif provider == PROVIDER_ANTHROPIC:
+        return create_anthropic_client()
+    else:
+        print(f"Error: Invalid provider specified: {provider}")
+        return None
 
 def create_openai_client() -> Optional[OpenAI]:
     """Create and return an OpenAI client if API key is available."""
@@ -47,6 +73,35 @@ def create_anthropic_client() -> Optional[Anthropic]:
         print("Anthropic API key not found in environment or .env file")
         return None
     return Anthropic(api_key=api_key)
+
+# --- Unified Query Function ---
+
+def query_model(client: APIClient, provider: str, prompt: str, model_name: str) -> str:
+    """
+    Query the specified AI model provider with the given prompt.
+
+    Args:
+        client: The API client (OpenAI or Anthropic)
+        provider: The API provider ("openai" or "anthropic")
+        prompt: The prompt to send
+        model_name: The name of the model to use
+
+    Returns:
+        The response text, or an empty string if an error occurs.
+    """
+    if provider == PROVIDER_OPENAI:
+        if not isinstance(client, OpenAI):
+            print("Error: Incorrect client type provided for OpenAI.")
+            return ""
+        return query_openai(client, prompt, model_name)
+    elif provider == PROVIDER_ANTHROPIC:
+        if not isinstance(client, Anthropic):
+            print("Error: Incorrect client type provided for Anthropic.")
+            return ""
+        return query_anthropic(client, prompt, model_name)
+    else:
+        print(f"Error: Invalid provider specified: {provider}")
+        return ""
 
 def query_openai(client: OpenAI, prompt: str, model_name: str) -> str:
     """
@@ -65,7 +120,7 @@ def query_openai(client: OpenAI, prompt: str, model_name: str) -> str:
         response = client.chat.completions.create(
             model=model_name,
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.7,
+            temperature=0.7, # Keep some temperature for evaluation to reflect typical use
         )
         return response.choices[0].message.content
     except Exception as e:
@@ -88,14 +143,44 @@ def query_anthropic(client: Anthropic, prompt: str, model_name: str) -> str:
         print(f"Querying Anthropic with model: {model_name}")
         response = client.messages.create(
             model=model_name,
-            max_tokens=1024,  # Lower for evaluation responses which should be shorter
-            temperature=0.7,
+            max_tokens=1024, # Lower for evaluation responses which should be shorter
+            temperature=0.7, # Keep some temperature for evaluation to reflect typical use
             messages=[{"role": "user", "content": prompt}]
         )
-        return response.content[0].text
+        # Handle potential differences in response structure if needed
+        if response.content and isinstance(response.content, list) and hasattr(response.content[0], 'text'):
+            return response.content[0].text
+        else:
+            # Log unexpected structure for debugging
+            print(f"Warning: Unexpected Anthropic response structure: {response}")
+            return "" # Or handle appropriately
     except Exception as e:
         print(f"Error querying Anthropic: {e}")
         return ""
+
+# --- Unified Model Listing ---
+
+def list_models(client: APIClient, provider: str) -> None:
+    """
+    List available models for the specified provider.
+
+    Args:
+        client: The API client (OpenAI or Anthropic)
+        provider: The API provider ("openai" or "anthropic")
+    """
+    if provider == PROVIDER_OPENAI:
+        if not isinstance(client, OpenAI):
+            print("Error: Incorrect client type provided for OpenAI.")
+            return
+        list_openai_models(client)
+    elif provider == PROVIDER_ANTHROPIC:
+        if not isinstance(client, Anthropic):
+            print("Error: Incorrect client type provided for Anthropic.")
+            return
+        list_anthropic_models(client)
+    else:
+        print(f"Error: Invalid provider specified: {provider}")
+
 
 def list_openai_models(client: OpenAI) -> None:
     """
@@ -148,6 +233,8 @@ def list_anthropic_models(client: Anthropic) -> None:
     except Exception as e:
         print(f"Error displaying Anthropic models: {e}")
 
+# --- Model Validation ---
+
 def validate_model_name(provider: str, model_name: str) -> bool:
     """
     Basic validation of model names for each provider.
@@ -159,13 +246,16 @@ def validate_model_name(provider: str, model_name: str) -> bool:
     Returns:
         True if the model name seems valid, False otherwise
     """
-    if provider == 'openai':
-        valid_prefixes = ['gpt-', 'text-', 'davinci']
-        return any(model_name.startswith(prefix) for prefix in valid_prefixes)
-    elif provider == 'anthropic':
+    if provider == PROVIDER_OPENAI:
+        # Updated to be slightly more general, allows for fine-tuned models etc.
+        # Basic check: model name shouldn't be empty and might contain ':' or '-'
+        return bool(model_name and (':' in model_name or '-' in model_name or 'gpt' in model_name.lower()))
+    elif provider == PROVIDER_ANTHROPIC:
         valid_prefixes = ['claude-']
         return any(model_name.startswith(prefix) for prefix in valid_prefixes)
     return False
+
+# --- JSON Saving ---
 
 def save_to_json(data: Dict[str, Any], filename_prefix: str, output_dir: str = None) -> str:
     """

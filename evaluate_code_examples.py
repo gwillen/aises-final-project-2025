@@ -16,16 +16,13 @@ import random
 import sys
 import re
 from datetime import datetime
-from typing import Dict, List, Optional, Any, Tuple
+from typing import Dict, List, Optional, Any
 
 # Import shared utilities
 from ai_utils import (
-    create_openai_client,
-    create_anthropic_client,
-    query_openai,
-    query_anthropic,
-    list_openai_models,
-    list_anthropic_models,
+    create_client,
+    query_model,
+    list_models,
     validate_model_name,
     save_to_json
 )
@@ -315,40 +312,6 @@ def extract_confidence(response: str, strategy: str = DEFAULT_CONFIDENCE_STRATEG
         return extract_inverse_confidence(response)
     else:
         return extract_standard_confidence(response)  # Fallback to standard
-
-def save_evaluation_to_json(example: Dict[str, Any], prompt: str, response: str,
-                           model_name: str, provider: str) -> str:
-    """
-    Save the evaluation data to a JSON file.
-
-    Args:
-        example: The original example
-        prompt: The prompt sent to the AI
-        response: The raw response from the AI
-        model_name: The name of the model used
-        provider: The API provider (OpenAI or Anthropic)
-
-    Returns:
-        The path to the saved JSON file
-    """
-    extracted_answer = extract_final_answer(response)
-    expected_answer = example.get('verified_answer', example.get('answer', ''))
-
-    data = {
-        "timestamp": datetime.now().strftime("%Y%m%d_%H%M%S"),
-        "provider": provider,
-        "model": model_name,
-        "example": example,
-        "prompt": prompt,
-        "full_response": response,
-        "extracted_answer": extracted_answer,
-        "expected_answer": expected_answer,
-        "match": extracted_answer.strip() == expected_answer.strip()
-    }
-
-    # Save to the output/evals directory
-    output_dir = "output/evals"
-    return save_to_json(data, f"evaluation_{provider}_{model_name.replace('-', '_')}", output_dir)
 
 def save_single_evaluation_with_confidence(evaluation: Dict[str, Any], model_name: str, provider: str) -> str:
     """
@@ -711,10 +674,7 @@ def evaluate_example(client, example: Dict[str, Any], model_name: str, provider:
         confidence_prompt = CONFIDENCE_PROMPTS[strategy]["before_template"].format(code=example['code'])
 
         # Query the model
-        if provider == 'openai':
-            confidence_response = query_openai(client, confidence_prompt, model_name)
-        else:  # anthropic
-            confidence_response = query_anthropic(client, confidence_prompt, model_name)
+        confidence_response = query_model(client, provider, confidence_prompt, model_name)
 
         # Extract confidence using the appropriate function
         confidence = None
@@ -734,10 +694,7 @@ def evaluate_example(client, example: Dict[str, Any], model_name: str, provider:
     # Now evaluate the actual example
     prompt = EVALUATION_PROMPT_TEMPLATE.format(code=example['code'])
 
-    if provider == 'openai':
-        response = query_openai(client, prompt, model_name)
-    else:  # anthropic
-        response = query_anthropic(client, prompt, model_name)
+    response = query_model(client, provider, prompt, model_name)
 
     if not response:
         print(f"No response received from the API for example: {example.get('language', 'Unknown')} difficulty {example.get('difficulty', '?')}")
@@ -753,10 +710,7 @@ def evaluate_example(client, example: Dict[str, Any], model_name: str, provider:
         confidence_prompt = CONFIDENCE_PROMPTS[strategy]["after_template"].format(code=example['code'])
 
         # Query the model
-        if provider == 'openai':
-            confidence_response = query_openai(client, confidence_prompt, model_name)
-        else:  # anthropic
-            confidence_response = query_anthropic(client, confidence_prompt, model_name)
+        confidence_response = query_model(client, provider, confidence_prompt, model_name)
 
         # Extract confidence using the appropriate function
         after_confidence = None
@@ -820,24 +774,13 @@ def main():
         return
 
     # Create the appropriate client based on provider
-    client = None
-    if args.provider == 'openai':
-        client = create_openai_client()
-        if not client:
-            return
+    client = create_client(args.provider)
+    if not client:
+        return
 
-        if args.list_models:
-            list_openai_models(client)
-            return
-
-    else:  # anthropic
-        client = create_anthropic_client()
-        if not client:
-            return
-
-        if args.list_models:
-            list_anthropic_models(client)
-            return
+    if args.list_models:
+        list_models(client, args.provider)
+        return
 
     # Check if model is provided when not listing models
     if not args.model:
@@ -890,8 +833,11 @@ def main():
         print(f"Using confidence strategies: {', '.join(confidence_strategies)}")
         evaluations = []
         correct_count = 0
-        total_confidence = {strategy: 0 for strategy in confidence_strategies}
-        valid_confidence_count = {strategy: 0 for strategy in confidence_strategies}
+        # Track before/after confidence separately
+        total_before_confidence = {strategy: 0 for strategy in confidence_strategies}
+        valid_before_confidence_count = {strategy: 0 for strategy in confidence_strategies}
+        total_after_confidence = {strategy: 0 for strategy in confidence_strategies}
+        valid_after_confidence_count = {strategy: 0 for strategy in confidence_strategies}
 
         for i, example in enumerate(examples, 1):
             print(f"[{i}/{len(examples)}] Evaluating {example['language']} example (difficulty {example.get('difficulty', '?')})...", end="", flush=True)
@@ -900,12 +846,18 @@ def main():
             if evaluation:
                 evaluations.append(evaluation)
 
-                # Track confidence for each strategy
+                # Track before and after confidence separately
                 for strategy in confidence_strategies:
-                    confidence = evaluation["confidence_results"][strategy]["confidence"]
-                    if confidence is not None:
-                        total_confidence[strategy] += confidence
-                        valid_confidence_count[strategy] += 1
+                    before_confidence = evaluation["confidence_results"][strategy].get("before_confidence")
+                    after_confidence = evaluation["confidence_results"][strategy].get("after_confidence")
+
+                    if before_confidence is not None:
+                        total_before_confidence[strategy] += before_confidence
+                        valid_before_confidence_count[strategy] += 1
+
+                    if after_confidence is not None:
+                        total_after_confidence[strategy] += after_confidence
+                        valid_after_confidence_count[strategy] += 1
 
                 # Use primary confidence for display
                 before_confidence = evaluation.get("before_confidence")
@@ -947,9 +899,10 @@ def main():
 
         # Print confidence summaries for each strategy
         for strategy in confidence_strategies:
-            if valid_confidence_count[strategy] > 0:
-                avg_confidence = total_confidence[strategy] / valid_confidence_count[strategy]
-                print(f"{strategy} average confidence: {avg_confidence:.2f} (valid: {valid_confidence_count[strategy]}/{len(evaluations)})")
+            if valid_before_confidence_count[strategy] > 0 or valid_after_confidence_count[strategy] > 0:
+                avg_before_confidence = total_before_confidence[strategy] / valid_before_confidence_count[strategy]
+                avg_after_confidence = total_after_confidence[strategy] / valid_after_confidence_count[strategy]
+                print(f"{strategy} average confidence: before={avg_before_confidence:.2f} (valid: {valid_before_confidence_count[strategy]}/{len(evaluations)}), after={avg_after_confidence:.2f} (valid: {valid_after_confidence_count[strategy]}/{len(evaluations)})")
 
         print(f"Results saved to {filename}")
         return
