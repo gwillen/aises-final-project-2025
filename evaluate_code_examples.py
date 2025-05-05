@@ -42,6 +42,11 @@ PROMPT_COMMON_SUFFIX = "Again, please give only the estimate, on a line by " \
 
 PROMPT_CODE_BLOCK = "```\n{code}\n```"
 
+PROMPT_SUPERFORECASTER = "You are a superforecaster. You are excel at " \
+        "pattern recognition, cognitive flexibility, and open-mindedness. " \
+        "You are well-calibrated, and you are careful to avoid being over- " \
+        "or under-confident in your beliefs."
+
 PROMPT_BEFORE_PREFIX = "In a moment, I will ask you what this code outputs or returns. " \
     "You will have to provide only your best immediate guess at the final answer, " \
     "without reasoning, analysis, or commentary. Before I do that, first I want to " \
@@ -55,7 +60,9 @@ PROMPT_STRATEGY_REQUESTS = {
     "betting": "You have $1000 of play money. How much of it will you bet " \
         "that your answer is correct? Please give a number between 0 and 1000.",
     "verbal": "Please describe in words how confident you are that your " \
-        "answer is correct."
+        "answer is correct.", \
+    "onetoten": "Please rate your confidence on a scale from 1 to 10, with " \
+        "10 being most confident."
 }
 # --- End Prompt Components ---
 
@@ -69,13 +76,17 @@ CONFIDENCE_STRATEGY_DEFINITIONS = {
         "description": "Ask for 1/(1-p) formulation: number of examples to get one wrong",
         "extract_func": "extract_inverse_confidence"
     },
+    "betting": {
+        "description": "Betting confidence estimate: how much money to bet on the answer",
+        "extract_func": "extract_betting_confidence"
+    },
     "verbal": {
         "description": "Verbal confidence estimate",
         "extract_func": "extract_verbal_confidence"
     }
 }
 
-def get_before_confidence_prompt(strategy: str, code: str) -> str:
+def get_before_confidence_prompt(strategy: str, code: str, superforecast: bool) -> str:
     """
     Constructs the 'before' confidence prompt (including the code).
 
@@ -87,12 +98,15 @@ def get_before_confidence_prompt(strategy: str, code: str) -> str:
         The fully constructed prompt string.
     """
     strategy_request = PROMPT_STRATEGY_REQUESTS[strategy]
+    superforecast_prefix = ""
+    if superforecast:
+        superforecast_prefix = f"{PROMPT_SUPERFORECASTER}\n\n"
 
     # Assemble the prompt parts
-    prompt = f"{PROMPT_BEFORE_PREFIX} {strategy_request} {PROMPT_COMMON_SUFFIX}\n\n{PROMPT_CODE_BLOCK.format(code=code)}"
+    prompt = f"{superforecast_prefix}{PROMPT_BEFORE_PREFIX} {strategy_request} {PROMPT_COMMON_SUFFIX}\n\n{PROMPT_CODE_BLOCK.format(code=code)}"
     return prompt.strip()
 
-def get_after_confidence_prompt_text(strategy: str) -> str:
+def get_after_confidence_prompt_text(strategy: str, superforecast: bool) -> str:
     """
     Constructs the text for the 'after' confidence prompt (without code).
 
@@ -103,7 +117,11 @@ def get_after_confidence_prompt_text(strategy: str) -> str:
         The prompt text string.
     """
     strategy_request = PROMPT_STRATEGY_REQUESTS[strategy]
-    return f"{strategy_request} {PROMPT_COMMON_SUFFIX}".strip()
+    superforecast_prefix = ""
+    if superforecast:
+        superforecast_prefix = f"{PROMPT_SUPERFORECASTER}\n\n"
+
+    return f"{superforecast_prefix}{strategy_request} {PROMPT_COMMON_SUFFIX}".strip()
 
 def load_examples_from_json(file_path: str) -> List[Dict[str, Any]]:
     """
@@ -329,6 +347,32 @@ def extract_inverse_confidence(response: str) -> float:
                 if number > 0:
                     return (number - 1) / number  # Convert to probability
                 return None
+            except ValueError:
+                pass
+
+    # Default to None if we couldn't extract anything
+    return None
+
+def extract_betting_confidence(response: str) -> float:
+    """
+    Extract the confidence estimate from a betting response.
+
+    Args:
+        response: The full response from the AI
+
+    Returns:
+        The extracted confidence as a float between 0 and 1, or None if extraction fails
+    """
+    for line in response.split('\n'):
+        line = line.strip()
+        if not line:
+            continue
+
+        # Try to extract a number
+        number_match = re.search(r'^(\d+(?:\.\d+)?)', line)
+        if number_match:
+            try:
+                return float(number_match.group(1))
             except ValueError:
                 pass
 
@@ -603,7 +647,7 @@ def save_multiple_evaluations_to_json(evaluations: List[Dict[str, Any]], model_n
     return save_to_json(data, filename, output_dir)
 
 def evaluate_example(client, example: Dict[str, Any], model_name: str, provider: str,
-                    confidence_strategies: List[str] = None) -> Dict[str, Any]:
+                    confidence_strategies: List[str] = None, superforecast: bool = False) -> Dict[str, Any]:
     """
     Evaluate a single example and return the evaluation results.
 
@@ -613,6 +657,7 @@ def evaluate_example(client, example: Dict[str, Any], model_name: str, provider:
         model_name: The name of the model to use
         provider: The API provider (OpenAI or Anthropic)
         confidence_strategies: List of confidence strategies to use (default: [DEFAULT_CONFIDENCE_STRATEGY])
+        superforecast: Whether to use the 'superforecaster' persona prompt
 
     Returns:
         A dictionary with the evaluation results
@@ -622,7 +667,7 @@ def evaluate_example(client, example: Dict[str, Any], model_name: str, provider:
 
     # Evaluate "before" confidence for each strategy
     for strategy in confidence_strategies:
-        before_confidence_prompt = get_before_confidence_prompt(strategy, example['code'])
+        before_confidence_prompt = get_before_confidence_prompt(strategy, example['code'], superforecast)
 
         # Query the model
         before_confidence_response = query_model(client, before_confidence_prompt, model_name, temperature=0.0)
@@ -634,6 +679,7 @@ def evaluate_example(client, example: Dict[str, Any], model_name: str, provider:
 
         # Store results (initialize after prompt/response/confidence to None)
         confidence_results[strategy] = {
+            "superforecast": superforecast,
             "before_prompt": before_confidence_prompt,
             "before_response": before_confidence_response,
             "before_confidence": confidence,
@@ -665,7 +711,7 @@ def evaluate_example(client, example: Dict[str, Any], model_name: str, provider:
     # --- Evaluate "after" confidence for each strategy ---
     # Use the *same conversation* where the model just answered
     for strategy in confidence_strategies:
-        after_prompt_text = get_after_confidence_prompt_text(strategy)
+        after_prompt_text = get_after_confidence_prompt_text(strategy, superforecast)
         after_prompt_message: StandardMessage = {"role": "user", "content": after_prompt_text}
 
         # Create a *copy* of the conversation to append to, for this specific strategy query
@@ -698,6 +744,7 @@ def evaluate_example(client, example: Dict[str, Any], model_name: str, provider:
         "expected_answer": expected_answer,
         "match": extracted_answer.strip() == expected_answer.strip(),
         "confidence_strategies": confidence_strategies,
+        "superforecast": superforecast,
         "confidence_results": confidence_results
     }
 
@@ -728,6 +775,8 @@ def main():
                         help='Run evaluation on all examples in the input file')
     parser.add_argument('--confidence-strategies', type=str,
                         help=f'Comma-separated list of confidence strategies to use. Available: {", ".join(CONFIDENCE_STRATEGY_DEFINITIONS.keys())}')
+    parser.add_argument('--superforecast', action='store_true',
+                        help='Use the superforecast persona prompt')
     parser.add_argument('--list-confidence-strategies', action='store_true',
                         help='List available confidence strategies and exit')
 
@@ -823,7 +872,7 @@ def main():
         for i, strategy in enumerate(confidence_strategies):
             print(f"\n=== Confidence Prompt {i+1}: {strategy} (Before Answer) ===")
             print("=" * 40)
-            print(get_before_confidence_prompt(strategy, first_example['code']))
+            print(get_before_confidence_prompt(strategy, first_example['code'], args.superforecast))
             print("=" * 40)
 
         # Show evaluation prompt
@@ -837,7 +886,7 @@ def main():
             print(f"\n=== Confidence Prompt {i+1}: {strategy} (After Answer) ===")
             print("=" * 40)
             # Construct the text dynamically for dry run display
-            print(get_after_confidence_prompt_text(strategy))
+            print(get_after_confidence_prompt_text(strategy, args.superforecast))
             print("=" * 40)
 
         print(f"\nWould evaluate {len(examples_to_run)} example(s) in total.")
@@ -855,7 +904,7 @@ def main():
     for i, example in enumerate(examples_to_run, 1):
         print(f"\n[{i}/{len(examples_to_run)}] Evaluating {example['language']} example (difficulty {example.get('difficulty', '?')})...", end="", flush=True)
 
-        evaluation = evaluate_example(client, example, args.model, args.provider, confidence_strategies)
+        evaluation = evaluate_example(client, example, args.model, args.provider, confidence_strategies, args.superforecast)
         if evaluation:
             evaluations.append(evaluation)
 

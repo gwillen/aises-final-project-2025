@@ -1,0 +1,249 @@
+#!/usr/bin/env python3
+"""
+Generates calibration reports from evaluation JSON files produced by evaluate_code_examples.py.
+
+Creates a calibration graph for each confidence strategy found in the input file.
+"""
+
+import os
+import json
+import argparse
+import numpy as np
+import matplotlib.pyplot as plt
+from typing import List, Dict, Any, Tuple, Optional
+
+def load_evaluation_data(filepath: str) -> Optional[Dict[str, Any]]:
+    """
+    Loads evaluation data from a JSON file.
+
+    Args:
+        filepath: Path to the JSON evaluation file.
+
+    Returns:
+        The loaded data as a dictionary, or None if an error occurs.
+    """
+    if not os.path.exists(filepath):
+        print(f"Error: Input file not found: {filepath}")
+        return None
+    try:
+        with open(filepath, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        if "evaluations" not in data or "confidence_strategies" not in data:
+            print(f"Error: Required keys ('evaluations', 'confidence_strategies') not found in {filepath}")
+            return None
+        return data
+    except json.JSONDecodeError:
+        print(f"Error: Invalid JSON format in file: {filepath}")
+        return None
+    except Exception as e:
+        print(f"Error loading evaluation data from {filepath}: {e}")
+        return None
+
+def extract_confidence_data(
+    evaluations: List[Dict[str, Any]],
+    strategy: str,
+    time_point: str
+) -> Tuple[List[float], List[bool]]:
+    """
+    Extracts confidence scores and corresponding match outcomes for a specific strategy and time point.
+
+    Args:
+        evaluations: The list of evaluation results.
+        strategy: The confidence strategy name (e.g., 'standard').
+        time_point: 'before' or 'after'.
+
+    Returns:
+        A tuple containing two lists: confidence scores and match outcomes (boolean).
+        Only includes data points where confidence was successfully extracted.
+    """
+    confidence_scores = []
+    actual_outcomes = []
+    confidence_key = f"{time_point}_confidence"
+
+    for eval_item in evaluations:
+        confidence_results = eval_item.get("confidence_results", {})
+        if strategy in confidence_results:
+            confidence = confidence_results[strategy].get(confidence_key)
+            is_match = eval_item.get("match")
+
+            # Only include if confidence is not None and match status is available
+            if confidence is not None and is_match is not None:
+                confidence_scores.append(confidence)
+                actual_outcomes.append(is_match)
+
+    return confidence_scores, actual_outcomes
+
+def plot_calibration_graph(
+    confidence_scores: List[float],
+    actual_outcomes: List[bool],
+    strategy_name: str,
+    time_point: str,
+    model_name: str,
+    provider_name: str,
+    output_dir: str,
+    input_filename_base: str,
+    num_bins: int = 10
+) -> None:
+    """
+    Generates and saves a calibration graph.
+
+    Args:
+        confidence_scores: List of predicted confidence scores (0.0 to 1.0).
+        actual_outcomes: List of actual outcomes (True for correct, False for incorrect).
+        strategy_name: Name of the confidence strategy.
+        time_point: 'before' or 'after'.
+        model_name: Name of the model evaluated.
+        provider_name: Name of the provider used.
+        output_dir: Directory to save the plot.
+        input_filename_base: Base name of the input file for constructing output filename.
+        num_bins: Number of bins to divide the confidence scores into.
+    """
+    if not confidence_scores:
+        print(f"Warning: No valid confidence data found for strategy '{strategy_name}' ({time_point}). Skipping plot.")
+        return
+
+    scores_array = np.array(confidence_scores)
+    outcomes_array = np.array(actual_outcomes)
+
+    # Define bins (e.g., 0.0-0.1, 0.1-0.2, ..., 0.9-1.0)
+    bin_edges = np.linspace(0.0, 1.0, num_bins + 1)
+    bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2 # For plotting
+
+    # Assign each score to a bin
+    bin_indices = np.digitize(scores_array, bin_edges[1:-1]) # Indices 0 to num_bins-1
+
+    mean_confidences = []
+    fraction_correct = []
+    bin_counts = []
+
+    for i in range(num_bins):
+        in_bin = (bin_indices == i)
+        count = np.sum(in_bin)
+        bin_counts.append(count)
+
+        if count > 0:
+            mean_conf = np.mean(scores_array[in_bin])
+            frac_correct = np.mean(outcomes_array[in_bin])
+            mean_confidences.append(mean_conf)
+            fraction_correct.append(frac_correct)
+        else:
+            # Handle empty bins - append NaN or use bin_centers/0? Let's skip plotting them.
+            # Append values that allow plotting vs bin_centers if needed
+             mean_confidences.append(bin_centers[i]) # Use bin center for x if empty
+             fraction_correct.append(np.nan) # Use NaN for y if empty
+
+    # Filter out bins with no data for plotting the curve
+    plot_mean_conf = [mc for i, mc in enumerate(mean_confidences) if bin_counts[i] > 0]
+    plot_frac_correct = [fc for i, fc in enumerate(fraction_correct) if bin_counts[i] > 0]
+
+    plt.figure(figsize=(8, 8))
+    # Plot perfect calibration line
+    plt.plot([0, 1], [0, 1], 'k:', label='Perfect Calibration')
+    # Plot calibration curve
+    if plot_mean_conf: # Only plot if there's data
+        plt.plot(plot_mean_conf, plot_frac_correct, 'o-', label=f'{strategy_name.capitalize()} ({time_point.capitalize()})', markersize=8)
+
+    # Add counts to the plot (optional, can be noisy)
+    # for i in range(num_bins):
+    #     if bin_counts[i] > 0 and not np.isnan(fraction_correct[i]):
+    #         plt.text(mean_confidences[i], fraction_correct[i] + 0.02, f'n={bin_counts[i]}', ha='center', va='bottom', fontsize=8)
+
+
+    plt.xlabel("Mean Predicted Confidence in Bin")
+    plt.ylabel("Fraction of Positives (Actual Accuracy in Bin)")
+    plt.title(f"Calibration Curve - {provider_name} {model_name} \
+Strategy: {strategy_name.capitalize()} ({time_point.capitalize()})")
+    plt.xlim([0, 1])
+    plt.ylim([0, 1])
+    plt.grid(True, linestyle='--', alpha=0.6)
+    plt.legend(loc='best')
+    plt.gca().set_aspect('equal', adjustable='box') # Ensure square plot with equal axes
+
+    # Save the plot
+    os.makedirs(output_dir, exist_ok=True)
+    filename = f"calibration_{input_filename_base}_{strategy_name}_{time_point}.png"
+    filepath = os.path.join(output_dir, filename)
+    try:
+        plt.savefig(filepath)
+        print(f"Saved calibration plot to: {filepath}")
+    except Exception as e:
+        print(f"Error saving plot to {filepath}: {e}")
+    plt.close() # Close the figure to free memory
+
+def main():
+    """Main function to parse arguments and generate reports."""
+    parser = argparse.ArgumentParser(description='Generate calibration graphs from evaluation data.')
+    parser.add_argument('--input-file', required=True,
+                        help='Path to the batch evaluation JSON file.')
+    parser.add_argument('--output-dir', default='output/reports',
+                        help='Base directory to save the generated report folders (default: output/reports).')
+    parser.add_argument('--bins', type=int, default=20,
+                        help='Number of bins for calibration plots (default: 20 for 5% bins).')
+
+    args = parser.parse_args()
+
+    print(f"Loading evaluation data from: {args.input_file}")
+    data = load_evaluation_data(args.input_file)
+    if not data:
+        return
+
+    evaluations = data.get("evaluations", [])
+    strategies = data.get("confidence_strategies", [])
+    model_name = data.get("model", "unknown_model")
+    provider_name = data.get("provider", "unknown_provider")
+    input_filename_base = os.path.splitext(os.path.basename(args.input_file))[0]
+
+    # Create a run-specific output directory
+    run_output_dir = os.path.join(args.output_dir, input_filename_base)
+    try:
+        os.makedirs(run_output_dir, exist_ok=True)
+        print(f"Ensured output directory for this run: {run_output_dir}")
+    except OSError as e:
+        print(f"Error creating output directory {run_output_dir}: {e}")
+        return
+
+    if not evaluations:
+        print("No evaluations found in the input file.")
+        return
+    if not strategies:
+        print("Warning: No confidence strategies listed in the input file.")
+        # Attempt to infer strategies if missing, though this shouldn't happen with current evaluate script
+        strategies = list(evaluations[0].get("confidence_results", {}).keys()) if evaluations else []
+        if not strategies:
+            print("Could not determine strategies. Exiting.")
+            return
+        print(f"Inferred strategies: {', '.join(strategies)}")
+
+    # Filter strategies to only include standard and inverse for now
+    target_strategies = [s for s in strategies if s in ['standard', 'inverse']]
+
+    if not target_strategies:
+        print("Neither 'standard' nor 'inverse' strategies found in the data. No plots to generate.")
+        return
+
+    print(f"Found {len(evaluations)} evaluations.")
+    print(f"Processing strategies for calibration plots: {', '.join(target_strategies)}")
+    print(f"Generating reports for {provider_name} / {model_name}")
+
+    for strategy in target_strategies:
+        print(f"Processing strategy: {strategy}")
+        for time_point in ['before', 'after']:
+            print(f"  Processing time point: {time_point}")
+            scores, outcomes = extract_confidence_data(evaluations, strategy, time_point)
+            print(f"    Found {len(scores)} valid data points.")
+            plot_calibration_graph(
+                scores,
+                outcomes,
+                strategy,
+                time_point,
+                model_name,
+                provider_name,
+                run_output_dir,
+                input_filename_base,
+                num_bins=args.bins
+            )
+
+    print("Report generation complete.")
+
+if __name__ == "__main__":
+    main()
