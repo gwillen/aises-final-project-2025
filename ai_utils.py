@@ -3,6 +3,7 @@
 Shared utilities for AI code example generation and evaluation.
 """
 
+from collections import defaultdict
 import os
 import json
 import re
@@ -13,14 +14,18 @@ try:
     import dotenv
     from openai import OpenAI
     from anthropic import Anthropic
+    import google.genai
+    from google.genai import Client as GoogleClient
+
     # Import specific response types for type hinting
     from openai.types.chat import ChatCompletion
     from anthropic.types import Message
-    APIClient = Union[OpenAI, Anthropic]
-    APIResponse = Union[ChatCompletion, Message] # Type alias for response objects
+    import google.genai.types
+    APIClient = Union[OpenAI, Anthropic, GoogleClient]
+    APIResponse = Union[ChatCompletion, Message, google.genai.types.GenerateContentResponse] # Type alias for response objects
 except ImportError as e:
     print(f"Error importing required packages: {e}")
-    print("Please install the required packages with: pip install openai anthropic python-dotenv")
+    print("Please install the required packages with: pip install openai anthropic google-genai python-dotenv")
     import sys
     sys.exit(1)
 
@@ -37,7 +42,7 @@ StandardConversation = List[StandardMessage]
 # --- Constants ---
 PROVIDER_OPENAI = "openai"
 PROVIDER_ANTHROPIC = "anthropic"
-
+PROVIDER_GOOGLE = "google"
 
 def ensure_output_directory(directory_path: str) -> None:
     """
@@ -56,7 +61,7 @@ def create_client(provider: str) -> Optional[APIClient]:
     Create and return an API client for the specified provider.
 
     Args:
-        provider: The API provider ("openai" or "anthropic")
+        provider: The API provider ("openai" or "anthropic" or "google")
 
     Returns:
         An OpenAI or Anthropic client, or None if the API key is missing or provider is invalid.
@@ -65,6 +70,8 @@ def create_client(provider: str) -> Optional[APIClient]:
         return create_openai_client()
     elif provider == PROVIDER_ANTHROPIC:
         return create_anthropic_client()
+    elif provider == PROVIDER_GOOGLE:
+        return create_google_client()
     else:
         print(f"Error: Invalid provider specified: {provider}")
         return None
@@ -85,6 +92,14 @@ def create_anthropic_client() -> Optional[Anthropic]:
         return None
     return Anthropic(api_key=api_key)
 
+def create_google_client() -> Optional[GoogleClient]:
+    """Create and return a Google client if API key is available."""
+    api_key = os.getenv("GOOGLE_API_KEY")
+    if not api_key:
+        print("Google API key not found in environment or .env file")
+        return None
+    return GoogleClient(api_key=api_key)
+
 # --- Conversation Format Conversion Helpers ---
 
 def _convert_standard_to_openai_format(conversation: StandardConversation) -> List[Dict[str, str]]:
@@ -95,7 +110,6 @@ def _convert_standard_to_openai_format(conversation: StandardConversation) -> Li
 def _convert_standard_to_anthropic_format(conversation: StandardConversation) -> tuple[Optional[str], List[Dict[str, str]]]:
     """Converts standard conversation format to Anthropic API format (system prompt, messages)."""
     system_prompt = None
-    messages = []
     if conversation and conversation[0]['role'] == 'system':
         system_prompt = conversation[0]['content']
         messages = conversation[1:]
@@ -103,6 +117,23 @@ def _convert_standard_to_anthropic_format(conversation: StandardConversation) ->
         messages = conversation
     # Anthropic expects dicts, which StandardMessage already is
     return system_prompt, messages
+
+def _convert_standard_to_google_format(conversation: StandardConversation) -> tuple[Optional[str], List[google.genai.types.Content]]:
+    """Converts standard conversation format to Google API format."""
+    system_prompt = None
+    if conversation and conversation[0]['role'] == 'system':
+        system_prompt = conversation[0]['content']
+        messages = conversation[1:]
+    else:
+        messages = conversation
+    return system_prompt, [
+        google.genai.types.Content(
+            # google uses 'model' instead of 'assistant' for the role, so we must convert
+            role='model' if message['role'] == 'assistant' else message['role'],
+            parts=[google.genai.types.Part.from_text(text=message['content'])]
+        )
+        for message in messages
+    ]
 
 def _extract_standard_response_message(response: Optional[APIResponse], client: APIClient) -> Optional[StandardMessage]:
     """Extracts the assistant's response from the API result into StandardMessage format."""
@@ -118,7 +149,14 @@ def _extract_standard_response_message(response: Optional[APIResponse], client: 
                 return {"role": "assistant", "content": response.content[0].text}
             else:
                 print(f"Warning: Unexpected Anthropic response structure: {response}")
-                return None # Or perhaps a message indicating an issue
+                return None
+        elif isinstance(client, GoogleClient) and isinstance(response, google.genai.types.GenerateContentResponse):
+            response_content = response.candidates[0].content
+            if response_content.parts and len(response_content.parts) == 1:
+                return {"role": "assistant", "content": response_content.parts[0].text}
+            else:
+                print(f"Warning: Unexpected Google response structure: {response}")
+                return None
         else:
             # This case indicates a type mismatch or unexpected response type
             print(f"Warning: Mismatched client type ({type(client)}) and response type ({type(response)}) or unknown response type.")
@@ -127,6 +165,24 @@ def _extract_standard_response_message(response: Optional[APIResponse], client: 
         print(f"Error extracting content from response object: {e}")
         print(f"Response object: {response}")
         return None
+
+# --- Rate Limiting ---
+import time
+last_request_time = defaultdict(float)
+
+def wait_for_ratelimit(tag: str, requests_per_second: float) -> None:
+    """
+    Wait for the ratelimit to be reset.
+    """
+    global last_request_time
+    seconds_per_request = 1.0 / requests_per_second
+    now = time.time()
+    time_since_last_request = now - last_request_time[tag]
+
+    if time_since_last_request < seconds_per_request:
+        print(f"Waiting for ratelimit to reset for {tag} ({(seconds_per_request - time_since_last_request) * 1000:.1f}ms)")
+        time.sleep(seconds_per_request - time_since_last_request)
+    last_request_time[tag] = now
 
 # --- Unified Query Function with History (Refactored) ---
 def query_model_with_history(
@@ -172,6 +228,20 @@ def query_model_with_history(
             if system_prompt:
                 create_params["system"] = system_prompt
             raw_response = client.messages.create(**create_params)
+        elif isinstance(client, GoogleClient):
+            system_prompt, google_messages = _convert_standard_to_google_format(conversation)
+            print(f"Querying Google ({model_name}) with history ({len(google_messages)} messages)")
+            # this is the limit for gemma 3, the most constrained model; the better models are so
+            #   slow that their ratelimits never matter in serial usage and can be ignored.
+            wait_for_ratelimit("google", 20.0 / 60.0)  # actually 30 but pad it a bit
+            raw_response = client.models.generate_content(
+                model=model_name,
+                config=google.genai.types.GenerateContentConfig(
+                    system_instruction=system_prompt,
+                    temperature=temperature,
+                ),
+                contents=google_messages
+            )
         else:
             print(f"Error: Unknown client type: {type(client)}")
             return conversation # Return original conversation on unknown client
@@ -243,6 +313,8 @@ def list_models(client: APIClient) -> None:
         list_openai_models(client)
     elif isinstance(client, Anthropic):
         list_anthropic_models(client)
+    elif isinstance(client, GoogleClient):
+        list_google_models(client)
     else:
         # This case should ideally not be reached if client is typed correctly
         print(f"Error: Unknown client type: {type(client)}")
@@ -298,6 +370,22 @@ def list_anthropic_models(client: Anthropic) -> None:
 
     except Exception as e:
         print(f"Error displaying Anthropic models: {e}")
+
+def list_google_models(client: GoogleClient) -> None:
+    """
+    List available Google models and print them to console.
+
+    Args:
+        client: Google client
+    """
+    try:
+        print("Fetching available Google models...")
+        models = client.models.list()
+        print(f"Found {len(models)} models:")
+        for model in models:
+            print(f"  - {model.name} ({model.display_name})")
+    except Exception as e:
+        print(f"Error fetching Google models: {e}")
 
 def save_to_json(data: Dict[str, Any], filename_prefix: str, output_dir: str = None) -> str:
     """

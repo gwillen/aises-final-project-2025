@@ -57,12 +57,14 @@ PROMPT_STRATEGY_REQUESTS = {
         "answer is correct, written as a percentage between 0 and 100.",
     "inverse": "Please give me an estimate of the number of similar problems " \
         "you would expect to attempt, on average, before getting one wrong. ",
-    "betting": "You have $1000 of play money. How much of it will you bet " \
-        "that your answer is correct? Please give a number between 0 and 1000.",
-    "verbal": "Please describe in words how confident you are that your " \
-        "answer is correct.", \
+    #"betting": "You have $1000 of play money. How much of it will you bet " \
+    #    "that your answer is correct? Please give a number between 0 and 1000.",
+    #"verbal": "Please describe in words how confident you are that your " \
+    #    "answer is correct.", \
     "onetoten": "Please rate your confidence on a scale from 1 to 10, with " \
-        "10 being most confident."
+        "1 being least confident, and 10 being most confident.",
+    "onetoten_decimal": "Please rate your confidence on a scale from 1.0 to 10.0, " \
+        "with 1.0 being least confident, and 10.0 being most confident."
 }
 # --- End Prompt Components ---
 
@@ -76,13 +78,21 @@ CONFIDENCE_STRATEGY_DEFINITIONS = {
         "description": "Ask for 1/(1-p) formulation: number of examples to get one wrong",
         "extract_func": "extract_inverse_confidence"
     },
-    "betting": {
-        "description": "Betting confidence estimate: how much money to bet on the answer",
-        "extract_func": "extract_betting_confidence"
+    #"betting": {
+    #    "description": "Betting confidence estimate: how much money to bet on the answer",
+    #    "extract_func": "extract_betting_confidence"
+    #},
+    #"verbal": {
+    #    "description": "Verbal confidence estimate",
+    #    "extract_func": "extract_verbal_confidence"
+    #},
+    "onetoten": {
+        "description": "1-10 confidence estimate",
+        "extract_func": "extract_onetoten_confidence"
     },
-    "verbal": {
-        "description": "Verbal confidence estimate",
-        "extract_func": "extract_verbal_confidence"
+    "onetoten_decimal": {
+        "description": "1-10 confidence estimate, as a decimal between 0 and 1",
+        "extract_func": "extract_onetoten_confidence"
     }
 }
 
@@ -390,6 +400,24 @@ def extract_verbal_confidence(response: str) -> float:
         None
     """
     # For now, just see what kinds of responses it gives.
+    return None
+
+def extract_onetoten_confidence(response: str) -> float:
+    """
+    Extract the confidence estimate from a 1-10 scale.
+    """
+    for line in response.split('\n'):
+        line = line.strip()
+        if not line:
+            continue
+
+        number_match = re.search(r'^(\d+(?:\.\d+)?)', line)
+        if number_match:
+            try:
+                return float(number_match.group(1)) / 10.0
+            except ValueError:
+                pass
+
     return None
 
 def extract_confidence(response: str, strategy: str) -> float:
@@ -761,8 +789,8 @@ def main():
     parser = argparse.ArgumentParser(description='Evaluate AI models on code examples')
     parser.add_argument('--input-file', type=str, required=True,
                         help='Path to the JSON file containing code examples')
-    parser.add_argument('--provider', choices=['openai', 'anthropic'], required=True,
-                        help='API provider to use (openai or anthropic)')
+    parser.add_argument('--provider', choices=['openai', 'anthropic', 'google'], required=True,
+                        help='API provider to use (openai or anthropic or google)')
     parser.add_argument('--model', type=str,
                         help='Model name to use (e.g., gpt-4 for OpenAI, claude-3-opus-20240229 for Anthropic)')
     parser.add_argument('--language', type=str,
