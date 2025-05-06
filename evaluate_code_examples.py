@@ -21,6 +21,7 @@ from ai_utils import (
     create_client,
     query_model,
     list_models,
+    query_openrouter_ratelimit,
     save_to_json,
     query_model_with_history,
     StandardConversation,
@@ -597,7 +598,7 @@ def save_multiple_evaluations_to_json(evaluations: List[Dict[str, Any]], model_n
     Args:
         evaluations: List of evaluation results
         model_name: The name of the model used
-        provider: The API provider (OpenAI or Anthropic)
+        provider: The API provider (OpenAI or Anthropic or Google or OpenRouter)
 
     Returns:
         The path to the saved JSON file
@@ -674,16 +675,15 @@ def save_multiple_evaluations_to_json(evaluations: List[Dict[str, Any]], model_n
     filename = f"batch_evaluation_{provider}_{model_name.replace('-', '_')}"
     return save_to_json(data, filename, output_dir)
 
-def evaluate_example(client, example: Dict[str, Any], model_name: str, provider: str,
+def evaluate_example(client, example: Dict[str, Any], model_name: str,
                     confidence_strategies: List[str] = None, superforecast: bool = False) -> Dict[str, Any]:
     """
     Evaluate a single example and return the evaluation results.
 
     Args:
-        client: The API client to use (OpenAI or Anthropic)
+        client: The API client to use (OpenAI or Anthropic or Google or OpenRouter)
         example: The example to evaluate
         model_name: The name of the model to use
-        provider: The API provider (OpenAI or Anthropic)
         confidence_strategies: List of confidence strategies to use (default: [DEFAULT_CONFIDENCE_STRATEGY])
         superforecast: Whether to use the 'superforecaster' persona prompt
 
@@ -789,8 +789,8 @@ def main():
     parser = argparse.ArgumentParser(description='Evaluate AI models on code examples')
     parser.add_argument('--input-file', type=str, required=True,
                         help='Path to the JSON file containing code examples')
-    parser.add_argument('--provider', choices=['openai', 'anthropic', 'google'], required=True,
-                        help='API provider to use (openai or anthropic or google)')
+    parser.add_argument('--provider', choices=['openai', 'anthropic', 'google', 'openrouter'], required=True,
+                        help='API provider to use (openai or anthropic or google or openrouter)')
     parser.add_argument('--model', type=str,
                         help='Model name to use (e.g., gpt-4 for OpenAI, claude-3-opus-20240229 for Anthropic)')
     parser.add_argument('--language', type=str,
@@ -799,8 +799,8 @@ def main():
                         help='List available models from the specified provider and exit')
     parser.add_argument('--dry-run', action='store_true',
                         help='Show what would be sent to the API without actually making the call')
-    parser.add_argument('--run-all', action='store_true',
-                        help='Run evaluation on all examples in the input file')
+    parser.add_argument('--run-examples', type=int, default=1,
+                        help='Run evaluation on the specified number of examples, or -1 for all')
     parser.add_argument('--confidence-strategies', type=str,
                         help=f'Comma-separated list of confidence strategies to use. Available: {", ".join(CONFIDENCE_STRATEGY_DEFINITIONS.keys())}')
     parser.add_argument('--superforecast', action='store_true',
@@ -861,20 +861,18 @@ def main():
         filtered_examples = matching_examples
 
     examples_to_run = []
-    if args.run_all:
+    if args.run_examples == -1:
         examples_to_run = filtered_examples
         if not examples_to_run:
             print("No examples selected to run.")
             return
         print(f"Preparing to evaluate {len(examples_to_run)} examples...")
     else:
-        # Select a single random example
-        selected_example = select_random_example(filtered_examples)
-        if not selected_example:
-            print("No example selected to run.")
+        examples_to_run = filtered_examples[:args.run_examples]
+        if not examples_to_run:
+            print("No examples selected to run.")
             return
-        examples_to_run = [selected_example]
-        print(f"Selected 1 random example to evaluate.")
+        print(f"Selected {args.run_examples} examples to evaluate.")
 
     # --- Handle Dry Run ---
     if args.dry_run:
@@ -932,7 +930,7 @@ def main():
     for i, example in enumerate(examples_to_run, 1):
         print(f"\n[{i}/{len(examples_to_run)}] Evaluating {example['language']} example (difficulty {example.get('difficulty', '?')})...", end="", flush=True)
 
-        evaluation = evaluate_example(client, example, args.model, args.provider, confidence_strategies, args.superforecast)
+        evaluation = evaluate_example(client, example, args.model, confidence_strategies, args.superforecast)
         if evaluation:
             evaluations.append(evaluation)
 

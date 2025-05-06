@@ -3,7 +3,7 @@
 Script to generate coding examples for software engineering interviews using AI.
 
 This script:
-1. Takes a prompt and sends it to either OpenAI or Anthropic API
+1. Takes a prompt and sends it to either OpenAI or Anthropic or Google or OpenRouter API
 2. Parses the response to extract code examples
 3. Saves the raw response and parsed examples to a timestamped JSON file
 """
@@ -119,7 +119,7 @@ def save_examples_to_json(
         raw_responses: List of raw responses from each API query
         all_examples: The aggregated list of parsed examples
         model_name: The name of the model used
-        provider: The API provider (OpenAI or Anthropic)
+        provider: The API provider (OpenAI or Anthropic or Google or OpenRouter)
         temperature: The temperature setting used for generation
         target_examples: The target number of examples requested
         max_queries: The maximum number of queries allowed
@@ -151,8 +151,8 @@ def save_examples_to_json(
 def main():
     """Main function to parse arguments and execute the query."""
     parser = argparse.ArgumentParser(description='Generate code examples using AI APIs')
-    parser.add_argument('--provider', choices=['openai', 'anthropic'], required=True,
-                        help='API provider to use (openai or anthropic)')
+    parser.add_argument('--provider', choices=['openai', 'anthropic', 'google', 'openrouter'], required=True,
+                        help='API provider to use (openai or anthropic or google or openrouter)')
     parser.add_argument('--model', type=str,
                         help='Model name to use (e.g., gpt-4 for OpenAI, claude-3-opus-20240229 for Anthropic)')
     parser.add_argument('--prompt', type=str, default=DEFAULT_PROMPT,

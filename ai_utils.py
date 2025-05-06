@@ -6,7 +6,6 @@ Shared utilities for AI code example generation and evaluation.
 from collections import defaultdict
 import os
 import json
-import re
 from typing import Dict, List, Optional, Any, Union, TypedDict, Literal
 from datetime import datetime
 
@@ -17,11 +16,16 @@ try:
     import google.genai
     from google.genai import Client as GoogleClient
 
+    class OpenRouterClient(OpenAI):
+        def __init__(self, *args, **kwargs):
+            new_kwargs = dict(kwargs, base_url="https://openrouter.ai/api/v1")
+            super().__init__(*args, **new_kwargs)
+
     # Import specific response types for type hinting
     from openai.types.chat import ChatCompletion
     from anthropic.types import Message
     import google.genai.types
-    APIClient = Union[OpenAI, Anthropic, GoogleClient]
+    APIClient = Union[OpenAI, Anthropic, GoogleClient, OpenRouterClient]
     APIResponse = Union[ChatCompletion, Message, google.genai.types.GenerateContentResponse] # Type alias for response objects
 except ImportError as e:
     print(f"Error importing required packages: {e}")
@@ -43,6 +47,7 @@ StandardConversation = List[StandardMessage]
 PROVIDER_OPENAI = "openai"
 PROVIDER_ANTHROPIC = "anthropic"
 PROVIDER_GOOGLE = "google"
+PROVIDER_OPENROUTER = "openrouter"
 
 def ensure_output_directory(directory_path: str) -> None:
     """
@@ -72,6 +77,8 @@ def create_client(provider: str) -> Optional[APIClient]:
         return create_anthropic_client()
     elif provider == PROVIDER_GOOGLE:
         return create_google_client()
+    elif provider == PROVIDER_OPENROUTER:
+        return create_openrouter_client()
     else:
         print(f"Error: Invalid provider specified: {provider}")
         return None
@@ -83,6 +90,14 @@ def create_openai_client() -> Optional[OpenAI]:
         print("OpenAI API key not found in environment or .env file")
         return None
     return OpenAI(api_key=api_key)
+
+def create_openrouter_client() -> Optional[OpenRouterClient]:
+    """Create and return an OpenRouter client if API key is available."""
+    api_key = os.getenv("OPENROUTER_API_KEY")
+    if not api_key:
+        print("OpenRouter API key not found in environment or .env file")
+        return None
+    return OpenRouterClient(api_key=api_key)
 
 def create_anthropic_client() -> Optional[Anthropic]:
     """Create and return an Anthropic client if API key is available."""
@@ -105,6 +120,11 @@ def create_google_client() -> Optional[GoogleClient]:
 def _convert_standard_to_openai_format(conversation: StandardConversation) -> List[Dict[str, str]]:
     """Converts standard conversation format to OpenAI API format."""
     # OpenAI format is identical to our standard format
+    return conversation
+
+def _convert_standard_to_openrouter_format(conversation: StandardConversation) -> List[Dict[str, str]]:
+    """Converts standard conversation format to OpenRouter API format."""
+    # OpenRouter format is just OpenAI format
     return conversation
 
 def _convert_standard_to_anthropic_format(conversation: StandardConversation) -> tuple[Optional[str], List[Dict[str, str]]]:
@@ -141,7 +161,7 @@ def _extract_standard_response_message(response: Optional[APIResponse], client: 
         return None
 
     try:
-        if isinstance(client, OpenAI) and isinstance(response, ChatCompletion):
+        if isinstance(client, OpenAI) or isinstance(client, OpenRouterClient) and isinstance(response, ChatCompletion):
             content = response.choices[0].message.content or ""
             return {"role": "assistant", "content": content}
         elif isinstance(client, Anthropic) and isinstance(response, Message):
@@ -184,7 +204,71 @@ def wait_for_ratelimit(tag: str, requests_per_second: float) -> None:
         time.sleep(seconds_per_request - time_since_last_request)
     last_request_time[tag] = now
 
-# --- Unified Query Function with History (Refactored) ---
+def query_openai_with_history(
+    client: OpenAI | OpenRouterClient,
+    model_name: str,
+    conversation: StandardConversation,
+    temperature: Optional[float] = 0.7
+) -> Optional[StandardMessage]:
+    openai_messages = _convert_standard_to_openai_format(conversation)
+    print(f"Querying {client.__class__.__name__} ({model_name}) with history ({len(openai_messages)} messages)")
+    if isinstance(client, OpenRouterClient):
+        query_openrouter_ratelimit(client)
+
+    raw_response = client.chat.completions.create(
+        model=model_name,
+        messages=openai_messages,
+        temperature=temperature,
+    )
+    return _extract_standard_response_message(raw_response, client)
+
+def query_anthropic_with_history(
+    client: Anthropic,
+    model_name: str,
+    conversation: StandardConversation,
+    temperature: Optional[float] = 0.7
+) -> Optional[StandardMessage]:
+    system_prompt, anthropic_messages = _convert_standard_to_anthropic_format(conversation)
+    print(f"Querying Anthropic ({model_name}) with history ({len(anthropic_messages)} messages, system: {system_prompt is not None})")
+    create_params = {
+        "model": model_name,
+        "max_tokens": 1024, # Keep consistent
+        "temperature": temperature,
+        "messages": anthropic_messages
+    }
+    if system_prompt:
+        create_params["system"] = system_prompt
+    raw_response = client.messages.create(**create_params)
+    return _extract_standard_response_message(raw_response, client)
+
+def query_google_with_history(
+    client: GoogleClient,
+    model_name: str,
+    conversation: StandardConversation,
+    temperature: Optional[float] = 0.7
+) -> Optional[StandardMessage]:
+    system_prompt, google_messages = _convert_standard_to_google_format(conversation)
+    print(f"Querying Google ({model_name}) with history ({len(google_messages)} messages)")
+    # this is the limit for gemma 3, the most constrained model; the better models are so
+    #   slow that their ratelimits never matter in serial usage and can be ignored.
+    wait_for_ratelimit("google", 20.0 / 60.0)  # actually 30 but pad it a bit
+    raw_response = client.models.generate_content(
+        model=model_name,
+        config=google.genai.types.GenerateContentConfig(
+            system_instruction=system_prompt,
+            temperature=temperature,
+        ),
+        contents=google_messages
+    )
+    return _extract_standard_response_message(raw_response, client)
+
+query_functions = {
+    OpenAI: query_openai_with_history,
+    Anthropic: query_anthropic_with_history,
+    GoogleClient: query_google_with_history,
+    OpenRouterClient: query_openai_with_history,
+}
+
 def query_model_with_history(
     client: APIClient,
     model_name: str,
@@ -207,47 +291,7 @@ def query_model_with_history(
         or the original conversation list if an error occurs or the response is empty.
     """
     try:
-        raw_response: Optional[APIResponse] = None
-        if isinstance(client, OpenAI):
-            openai_messages = _convert_standard_to_openai_format(conversation)
-            print(f"Querying OpenAI ({model_name}) with history ({len(openai_messages)} messages)")
-            raw_response = client.chat.completions.create(
-                model=model_name,
-                messages=openai_messages,
-                temperature=temperature,
-            )
-        elif isinstance(client, Anthropic):
-            system_prompt, anthropic_messages = _convert_standard_to_anthropic_format(conversation)
-            print(f"Querying Anthropic ({model_name}) with history ({len(anthropic_messages)} messages, system: {system_prompt is not None})")
-            create_params = {
-                "model": model_name,
-                "max_tokens": 1024, # Keep consistent
-                "temperature": temperature,
-                "messages": anthropic_messages
-            }
-            if system_prompt:
-                create_params["system"] = system_prompt
-            raw_response = client.messages.create(**create_params)
-        elif isinstance(client, GoogleClient):
-            system_prompt, google_messages = _convert_standard_to_google_format(conversation)
-            print(f"Querying Google ({model_name}) with history ({len(google_messages)} messages)")
-            # this is the limit for gemma 3, the most constrained model; the better models are so
-            #   slow that their ratelimits never matter in serial usage and can be ignored.
-            wait_for_ratelimit("google", 20.0 / 60.0)  # actually 30 but pad it a bit
-            raw_response = client.models.generate_content(
-                model=model_name,
-                config=google.genai.types.GenerateContentConfig(
-                    system_instruction=system_prompt,
-                    temperature=temperature,
-                ),
-                contents=google_messages
-            )
-        else:
-            print(f"Error: Unknown client type: {type(client)}")
-            return conversation # Return original conversation on unknown client
-
-        # Convert the raw response back to the standard format
-        assistant_message = _extract_standard_response_message(raw_response, client)
+        assistant_message: Optional[StandardMessage] = query_functions[type(client)](client, model_name, conversation, temperature)
 
         # Append the message if successfully extracted
         if assistant_message and assistant_message.get("content"): # Ensure content isn't empty
@@ -307,7 +351,7 @@ def list_models(client: APIClient) -> None:
     List available models for the specified provider.
 
     Args:
-        client: The API client (OpenAI or Anthropic)
+        client: The API client (OpenAI or Anthropic or Google or OpenRouter)
     """
     if isinstance(client, OpenAI):
         list_openai_models(client)
@@ -320,7 +364,7 @@ def list_models(client: APIClient) -> None:
         print(f"Error: Unknown client type: {type(client)}")
 
 
-def list_openai_models(client: OpenAI) -> None:
+def list_openai_models(client: OpenAI | OpenRouterClient) -> None:
     """
     List available OpenAI models and print them to console.
 
@@ -328,19 +372,21 @@ def list_openai_models(client: OpenAI) -> None:
         client: OpenAI client
     """
     try:
-        print("Fetching available OpenAI models...")
+        print(f"Fetching available {client.__class__.__name__} models...")
         models = client.models.list()
 
-        # Filter for chat completion models (typically what we want for this script)
-        chat_models = [model.id for model in models.data if "gpt" in model.id.lower()]
-        chat_models.sort()
-
-        print("\nAvailable OpenAI models for chat completion:")
-        for model in chat_models:
-            print(f"  - {model}")
+        print(f"\nAvailable {client.__class__.__name__} models for chat completion:")
+        for model in models.data:
+            print(f"  - {model.id}")
 
     except Exception as e:
-        print(f"Error fetching OpenAI models: {e}")
+        print(f"Error fetching {client.__class__.__name__} models: {e}")
+
+def list_openrouter_models(client: OpenRouterClient) -> None:
+    """
+    List available OpenRouter models and print them to console.
+    """
+    return list_openai_models(client)
 
 def list_anthropic_models(client: Anthropic) -> None:
     """
@@ -387,6 +433,14 @@ def list_google_models(client: GoogleClient) -> None:
     except Exception as e:
         print(f"Error fetching Google models: {e}")
 
+def query_openrouter_ratelimit(client: OpenRouterClient) -> None:
+    """
+    Query the OpenRouter API to get the current ratelimit status.
+    """
+    # https://openrouter.ai/api/v1/auth/key
+    response = client.get("/auth/key", cast_to=str)
+    print("OpenRouter ratelimit response:",response)
+
 def save_to_json(data: Dict[str, Any], filename_prefix: str, output_dir: str = None) -> str:
     """
     Save data to a timestamped JSON file in the specified directory.
@@ -399,6 +453,10 @@ def save_to_json(data: Dict[str, Any], filename_prefix: str, output_dir: str = N
     Returns:
         The path to the saved JSON file
     """
+    if "/" in filename_prefix:
+        print(f"WARNING: Filename prefix contains a slash: {filename_prefix}")
+        filename_prefix = filename_prefix.replace("/", "__")
+
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     filename = f"{filename_prefix}_{timestamp}.json"
 
