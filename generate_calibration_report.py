@@ -71,6 +71,17 @@ def extract_confidence_data(
                 confidence_scores.append(confidence)
                 actual_outcomes.append(is_match)
 
+    from collections import Counter
+
+    print(f"Extracted {len(confidence_scores)} data points for strategy '{strategy}' ({time_point})")
+    confidence_scores_match = [c for c, o in zip(confidence_scores, actual_outcomes) if o]
+    confidence_counts_match = Counter(confidence_scores_match)
+    print(f"Confidence counts when match: {confidence_counts_match}")
+
+    confidence_scores_not_match = [c for c, o in zip(confidence_scores, actual_outcomes) if not o]
+    confidence_counts_not_match = Counter(confidence_scores_not_match)
+    print(f"Confidence counts when not match: {confidence_counts_not_match}")
+
     return confidence_scores, actual_outcomes
 
 def plot_calibration_graph(
@@ -214,8 +225,10 @@ def main():
             return
         print(f"Inferred strategies: {', '.join(strategies)}")
 
+    print(f"Strategies: {strategies}")
+    strategies_to_plot = ["standard", "inverse", "onetoten", "onetoten_decimal"]
     # Filter strategies to only include standard and inverse for now
-    target_strategies = [s for s in strategies if s in ['standard', 'inverse']]
+    target_strategies = [s for s in strategies if s in strategies_to_plot]
 
     if not target_strategies:
         print("Neither 'standard' nor 'inverse' strategies found in the data. No plots to generate.")
