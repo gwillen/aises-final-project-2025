@@ -287,7 +287,8 @@ def query_model_with_history(
     model_name: str,
     conversation: StandardConversation,
     temperature: Optional[float] = 0.7,
-    thinking: Optional[bool] = False
+    thinking: Optional[bool] = False,
+    retries: Optional[int] = 3
 ) -> StandardConversation:
     """
     Query the specified AI model provider with a given conversation history.
@@ -299,27 +300,35 @@ def query_model_with_history(
         model_name: The name of the model to use.
         conversation: A list of StandardMessage dictionaries representing the history.
         temperature: The sampling temperature (default: 0.7).
-
+        retries: The number of retries to attempt (default: 3).
     Returns:
         The updated StandardConversation list including the assistant's response,
         or the original conversation list if an error occurs or the response is empty.
     """
-    try:
-        assistant_message: Optional[StandardMessage] = query_functions[type(client)](client, model_name, conversation, temperature, thinking)
+    # I expect that retrying will fail in many cases, but it protects us from minor stupidity, like API errors and ratelimits.
+    for i in range(retries):
+        try:
+            assistant_message: Optional[StandardMessage] = query_functions[type(client)](client, model_name, conversation, temperature, thinking)
 
-        # Append the message if successfully extracted
-        if assistant_message and assistant_message.get("content"): # Ensure content isn't empty
-            # Important: Create a copy to avoid modifying the original list passed by the caller if they reuse it
-            updated_conversation = conversation[:]
-            updated_conversation.append(assistant_message)
-            return updated_conversation
-        else:
-            print("Warning: Failed to extract valid assistant message from response.")
-            return conversation # Return original if response extraction failed
+            # Append the message if successfully extracted
+            if assistant_message and assistant_message.get("content"): # Ensure content isn't empty
+                # Important: Create a copy to avoid modifying the original list passed by the caller if they reuse it
+                updated_conversation = conversation[:]
+                updated_conversation.append(assistant_message)
+                return updated_conversation
+            else:
+                print(f"Warning: Failed to extract valid assistant message from response. Retrying... ({i+1}/{retries})")
+                if i < retries - 1:
+                    time.sleep(5)
 
-    except Exception as e:
-        print(f"Error querying model with history: {e}")
-        return conversation # Return original conversation on API error
+        except Exception as e:
+            print(f"Warning: Failed to query model with history: {e}. Retrying... ({i+1}/{retries})")
+            if i < retries - 1:
+                time.sleep(5)
+
+    print(f"Error: Failed to query model with history after {retries} retries.")
+    # XXX: I don't like this API, but live with it for now.
+    return conversation
 
 # --- Unified Query Function (Refactored) ---
 def query_model_thinking(
@@ -327,7 +336,8 @@ def query_model_thinking(
     prompt: str,
     model_name: str,
     temperature: Optional[float] = 0.7,
-    thinking: Optional[bool] = False
+    thinking: Optional[bool] = False,
+    retries: Optional[int] = 3
 ) -> Optional[Dict[str, Any]]:
     """
     Query the specified AI model provider with a single user prompt.
@@ -347,7 +357,7 @@ def query_model_thinking(
     # Pass a copy in case the list is reused elsewhere, although unlikely here
     # Pass temperature down
     updated_conversation = query_model_with_history(
-        client, model_name, initial_conversation[:], temperature=temperature, thinking=thinking
+        client, model_name, initial_conversation[:], temperature=temperature, thinking=thinking, retries=retries
     )
 
     # Check if the conversation was actually updated (i.e., API call succeeded)
