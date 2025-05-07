@@ -286,10 +286,14 @@ def extract_standard_confidence(response: str) -> float:
     # Look for percentage or decimal value
     response = response.strip()
 
-    # First look for a line with just a number
     for line in reversed(response.split('\n')):
         line = line.strip()
         if not line:
+            continue
+
+        if line.startswith("CONFIDENCE: "):
+            line = line[len("CONFIDENCE: "):].strip()
+        else:
             continue
 
         # Try to extract a percentage or decimal
@@ -354,6 +358,11 @@ def extract_inverse_confidence(response: str) -> float:
         if not line:
             continue
 
+        if line.startswith("CONFIDENCE: "):
+            line = line[len("CONFIDENCE: "):].strip()
+        else:
+            continue
+
         # Try to extract ratios like "10:1" or "10 to 1"
         ratio_match = re.search(r'(\d+(?:\.\d+)?)\s*(?::|to)\s*1', line)
         if ratio_match:
@@ -416,6 +425,11 @@ def extract_betting_confidence(response: str) -> float:
         if not line:
             continue
 
+        if line.startswith("CONFIDENCE: "):
+            line = line[len("CONFIDENCE: "):].strip()
+        else:
+            continue
+
         # Try to extract a number
         number_match = re.search(r'(\d+(?:\.\d+)?)', line)
         if number_match:
@@ -447,6 +461,11 @@ def extract_onetoten_confidence(response: str) -> float:
     for line in reversed(response.split('\n')):
         line = line.strip()
         if not line:
+            continue
+
+        if line.startswith("CONFIDENCE: "):
+            line = line[len("CONFIDENCE: "):].strip()
+        else:
             continue
 
         number_match = re.search(r'(\d+(?:\.\d+)?)', line)
@@ -627,8 +646,7 @@ def _calculate_stat_averages(stats_block: Dict[str, Any], strategies: List[str])
         strategy_calc["confidence_changes_by_result"] = strategy_agg["confidence_changes_by_result"]
 
 # --- End Helper Functions ---
-
-def save_multiple_evaluations_to_json(evaluations: List[Dict[str, Any]], model_name: str, provider: str) -> str:
+def save_multiple_evaluations_to_json(evaluations: List[Dict[str, Any]], model_name: str, provider: str, examples_from_model: str, thinking: bool, superforecast: bool) -> str:
     """
     Save multiple evaluations data to a single JSON file, including summary statistics.
 
@@ -697,6 +715,8 @@ def save_multiple_evaluations_to_json(evaluations: List[Dict[str, Any]], model_n
         "timestamp": timestamp,
         "provider": provider,
         "model": model_name,
+        "examples_from_model": examples_from_model,
+        "thinking": thinking,
         "total_examples": overall_stats["total"],
         "total_matches": overall_stats["matches"],
         "match_rate": overall_stats["match_rate"],
@@ -709,7 +729,7 @@ def save_multiple_evaluations_to_json(evaluations: List[Dict[str, Any]], model_n
 
     # Save to the output/evals directory
     output_dir = "output/evals"
-    filename = f"batch_evaluation_{provider}_{model_name.replace('-', '_')}"
+    filename = f"{model_name.replace('-', '_')}__from__{examples_from_model.replace('-', '_')}__thinking_{thinking}__superforecast_{superforecast}"
     return save_to_json(data, filename, output_dir)
 
 def evaluate_example(client, example: Dict[str, Any], model_name: str,
@@ -1041,7 +1061,7 @@ def main():
         return
 
     # Save all evaluations (1 or more) to a single file with aggregated stats
-    filename = save_multiple_evaluations_to_json(evaluations, args.model, args.provider)
+    filename = save_multiple_evaluations_to_json(evaluations, args.model, args.provider, examples[0].get("original_model", "unknown"), args.thinking, args.superforecast)
 
     # Load the summary stats back from the saved file (or recalculate)
     # For simplicity, we'll just recalculate the top-level summary here

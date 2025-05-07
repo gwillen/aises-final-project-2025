@@ -165,6 +165,21 @@ def plot_calibration_graph(
     superforecast_str = "(superforecast persona prompt)" if superforecast else "(no persona prompt)"
 
     scores_array = np.array(confidence_scores)
+
+    # XXX: correct the confidence scores for formatting issues. This is a
+    #   terrible hack and I'm sorry. :-(
+    # For scores between 0 and 1, leave them alone. For scores betweeen 25
+    #   and 100, which are obviously misparsed percentages, divide them by 100.
+    # The model is never so unconfident that a score between 1 and 25 would
+    #   make sense, so give up if we see that.
+    for i, score in enumerate(scores_array):
+        if score >= 25 and score <= 100:
+            scores_array[i] = score / 100
+        elif score >= 0 and score <= 1:
+            pass
+        else:
+            raise ValueError(f"Strange confidence score: {score} for example {i}")
+
     outcomes_array = np.array(actual_outcomes)
 
     # Define bins (e.g., 0.0-0.1, 0.1-0.2, ..., 0.9-1.0)
@@ -193,10 +208,10 @@ def plot_calibration_graph(
             #err5 = clopper_pearson(outcomes_array[in_bin], 0.05)
             #err10 = clopper_pearson(outcomes_array[in_bin], 0.1)
             #err20 = clopper_pearson(outcomes_array[in_bin], 0.2)
-            err5_wilson = wilson_interval(outcomes_array[in_bin], 0.05)
-            err10_wilson = wilson_interval(outcomes_array[in_bin], 0.1)
+            #err5_wilson = wilson_interval(outcomes_array[in_bin], 0.05)
+            #err10_wilson = wilson_interval(outcomes_array[in_bin], 0.1)
             err20_wilson = wilson_interval(outcomes_array[in_bin], 0.2)
-            error_bars.append([err5_wilson, err10_wilson, err20_wilson])
+            error_bars.append([err20_wilson])
 
             print(f"Bin {i}:")
             print(f"count: {count}")
@@ -234,8 +249,8 @@ def plot_calibration_graph(
         plt.plot(plot_mean_conf, plot_frac_correct, 'o-', label=f'{strategy_name.capitalize()} ({time_point.capitalize()})', markersize=8)
         if draw_error_bars:
             plt.errorbar(plot_mean_conf, plot_frac_correct, yerr=plot_error_bars[0], fmt='none', ecolor='black', capsize=5)
-            plt.errorbar(plot_mean_conf, plot_frac_correct, yerr=plot_error_bars[1], fmt='none', ecolor='red', capsize=5)
-            plt.errorbar(plot_mean_conf, plot_frac_correct, yerr=plot_error_bars[2], fmt='none', ecolor='blue', capsize=5)
+            #plt.errorbar(plot_mean_conf, plot_frac_correct, yerr=plot_error_bars[1], fmt='none', ecolor='red', capsize=5)
+            #plt.errorbar(plot_mean_conf, plot_frac_correct, yerr=plot_error_bars[2], fmt='none', ecolor='blue', capsize=5)
     # Add counts to the plot (optional, can be noisy)
     if draw_counts:
         for i in range(num_bins):
