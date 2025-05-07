@@ -167,6 +167,9 @@ def _extract_standard_response_message(response: Optional[APIResponse], client: 
         elif isinstance(client, Anthropic) and isinstance(response, Message):
             if response.content and isinstance(response.content, list) and hasattr(response.content[0], 'text'):
                 return {"role": "assistant", "content": response.content[0].text}
+            elif response.content and isinstance(response.content, list) and len(response.content) == 2 and hasattr(response.content[1], 'text'):
+                # assume thinking mode, kinda hacky
+                return {"role": "assistant", "content": response.content[1].text, "thinking": response.content[0].thinking}
             else:
                 print(f"Warning: Unexpected Anthropic response structure: {response}")
                 return None
@@ -208,8 +211,10 @@ def query_openai_with_history(
     client: OpenAI | OpenRouterClient,
     model_name: str,
     conversation: StandardConversation,
-    temperature: Optional[float] = 0.7
+    temperature: Optional[float] = 0.7,
+    thinking: Optional[bool] = False
 ) -> Optional[StandardMessage]:
+    assert thinking is False, "OpenAI does not support thinking"
     openai_messages = _convert_standard_to_openai_format(conversation)
     print(f"Querying {client.__class__.__name__} ({model_name}) with history ({len(openai_messages)} messages)")
     if isinstance(client, OpenRouterClient):
@@ -226,18 +231,24 @@ def query_anthropic_with_history(
     client: Anthropic,
     model_name: str,
     conversation: StandardConversation,
-    temperature: Optional[float] = 0.7
+    temperature: Optional[float] = 0.7,
+    thinking: Optional[bool] = False
 ) -> Optional[StandardMessage]:
     system_prompt, anthropic_messages = _convert_standard_to_anthropic_format(conversation)
     print(f"Querying Anthropic ({model_name}) with history ({len(anthropic_messages)} messages, system: {system_prompt is not None})")
     create_params = {
         "model": model_name,
-        "max_tokens": 1024, # Keep consistent
+        "max_tokens": 2048,  # arbitrary
         "temperature": temperature,
-        "messages": anthropic_messages
+        "messages": anthropic_messages,
     }
     if system_prompt:
         create_params["system"] = system_prompt
+    if thinking:
+        create_params["thinking"] = {
+            "type": "enabled",
+            "budget_tokens": 1024,  # minimum allowed, arbitrary
+        }
     raw_response = client.messages.create(**create_params)
     return _extract_standard_response_message(raw_response, client)
 
@@ -245,8 +256,10 @@ def query_google_with_history(
     client: GoogleClient,
     model_name: str,
     conversation: StandardConversation,
-    temperature: Optional[float] = 0.7
+    temperature: Optional[float] = 0.7,
+    thinking: Optional[bool] = False
 ) -> Optional[StandardMessage]:
+    assert thinking is False, "Google does not support thinking"
     system_prompt, google_messages = _convert_standard_to_google_format(conversation)
     print(f"Querying Google ({model_name}) with history ({len(google_messages)} messages)")
     # this is the limit for gemma 3, the most constrained model; the better models are so
@@ -273,7 +286,8 @@ def query_model_with_history(
     client: APIClient,
     model_name: str,
     conversation: StandardConversation,
-    temperature: Optional[float] = 0.7
+    temperature: Optional[float] = 0.7,
+    thinking: Optional[bool] = False
 ) -> StandardConversation:
     """
     Query the specified AI model provider with a given conversation history.
@@ -291,7 +305,7 @@ def query_model_with_history(
         or the original conversation list if an error occurs or the response is empty.
     """
     try:
-        assistant_message: Optional[StandardMessage] = query_functions[type(client)](client, model_name, conversation, temperature)
+        assistant_message: Optional[StandardMessage] = query_functions[type(client)](client, model_name, conversation, temperature, thinking)
 
         # Append the message if successfully extracted
         if assistant_message and assistant_message.get("content"): # Ensure content isn't empty
@@ -308,12 +322,13 @@ def query_model_with_history(
         return conversation # Return original conversation on API error
 
 # --- Unified Query Function (Refactored) ---
-def query_model(
+def query_model_thinking(
     client: APIClient,
     prompt: str,
     model_name: str,
-    temperature: Optional[float] = 0.7
-) -> str:
+    temperature: Optional[float] = 0.7,
+    thinking: Optional[bool] = False
+) -> Optional[Dict[str, Any]]:
     """
     Query the specified AI model provider with a single user prompt.
     (Calls the history-based function internally).
@@ -325,24 +340,33 @@ def query_model(
         temperature: The sampling temperature (default: 0.7).
 
     Returns:
-        The response text, or an empty string if an error occurs.
+        A dictionary with the response text and thinking, or None if an error occurs.
     """
     # Construct minimal conversation
     initial_conversation: StandardConversation = [{"role": "user", "content": prompt}]
     # Pass a copy in case the list is reused elsewhere, although unlikely here
     # Pass temperature down
     updated_conversation = query_model_with_history(
-        client, model_name, initial_conversation[:], temperature=temperature
+        client, model_name, initial_conversation[:], temperature=temperature, thinking=thinking
     )
 
     # Check if the conversation was actually updated (i.e., API call succeeded)
     # and the last message is from the assistant
     if len(updated_conversation) > len(initial_conversation) and updated_conversation[-1]["role"] == "assistant":
-        # Extract content from the last message (the assistant's response)
-        return updated_conversation[-1].get("content", "")
+        return {
+            "content": updated_conversation[-1].get("content", ""),
+            "thinking": updated_conversation[-1].get("thinking", None),
+        }
     else:
         # API call or response extraction likely failed, return empty string
-        return ""
+        return None
+
+def query_model(*args, **kwargs) -> Optional[str]:
+    """
+    Query the specified AI model provider with a single user prompt.
+    (Calls the history-based function internally).
+    """
+    return query_model_thinking(*args, **kwargs)["content"]
 
 # --- Unified Model Listing ---
 

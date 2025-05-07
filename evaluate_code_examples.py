@@ -21,7 +21,7 @@ from ai_utils import (
     create_client,
     query_model,
     list_models,
-    query_openrouter_ratelimit,
+    query_model_thinking,
     save_to_json,
     query_model_with_history,
     StandardConversation,
@@ -38,8 +38,10 @@ at the final answer, on a line by itself; no reasoning, analysis, or commentary.
 """
 
 # --- Confidence Prompt Components ---
-PROMPT_COMMON_SUFFIX = "Again, please give only the estimate, on a line by " \
+PROMPT_COMMON_SUFFIX_NOTHINK = "Again, please give only the estimate, on a line by " \
     "itself, without reasoning, analysis, or commentary."
+PROMPT_COMMON_SUFFIX_THINK = "Again, please end with the estimate, on a line by " \
+    "itself."
 
 PROMPT_CODE_BLOCK = "```\n{code}\n```"
 
@@ -47,11 +49,19 @@ PROMPT_SUPERFORECASTER = "You are a superforecaster. You are excel at " \
         "pattern recognition, cognitive flexibility, and open-mindedness. " \
         "You are well-calibrated, and you are careful to avoid being over- " \
         "or under-confident in your beliefs."
+PROMPT_SUPERFORECASTER_v2 = "You are a superforecaster. You are excel at " \
+        "pattern recognition, cognitive flexibility, and open-mindedness. " \
+        "You are well-calibrated, and you are careful to avoid being over- " \
+        "or under-confident in your beliefs. You give precise estimates, " \
+        "using all available precision to fully express your certainty, " \
+        "without using rounded values."
 
-PROMPT_BEFORE_PREFIX = "In a moment, I will ask you what this code outputs or returns. " \
+PROMPT_BEFORE_PREFIX_NOTHINK = "In a moment, I will ask you what this code outputs or returns. " \
     "You will have to provide only your best immediate guess at the final answer, " \
     "without reasoning, analysis, or commentary. Before I do that, first I want to " \
     "evaluate your confidence that you can answer correctly."
+PROMPT_BEFORE_PREFIX_THINK = "In a moment, I will ask you what this code outputs or returns. " \
+    "Before I do that, first I want to evaluate your confidence that you can answer correctly."
 
 PROMPT_STRATEGY_REQUESTS = {
     "standard": "Please give me an estimate of the probability that your " \
@@ -97,7 +107,7 @@ CONFIDENCE_STRATEGY_DEFINITIONS = {
     }
 }
 
-def get_before_confidence_prompt(strategy: str, code: str, superforecast: bool) -> str:
+def get_before_confidence_prompt(strategy: str, code: str, superforecast: bool, thinking: bool) -> str:
     """
     Constructs the 'before' confidence prompt (including the code).
 
@@ -114,10 +124,13 @@ def get_before_confidence_prompt(strategy: str, code: str, superforecast: bool) 
         superforecast_prefix = f"{PROMPT_SUPERFORECASTER}\n\n"
 
     # Assemble the prompt parts
-    prompt = f"{superforecast_prefix}{PROMPT_BEFORE_PREFIX} {strategy_request} {PROMPT_COMMON_SUFFIX}\n\n{PROMPT_CODE_BLOCK.format(code=code)}"
+    if thinking:
+        prompt = f"{superforecast_prefix}{PROMPT_BEFORE_PREFIX_THINK} {strategy_request} {PROMPT_COMMON_SUFFIX_THINK}\n\n{PROMPT_CODE_BLOCK.format(code=code)}"
+    else:
+        prompt = f"{superforecast_prefix}{PROMPT_BEFORE_PREFIX_NOTHINK} {strategy_request} {PROMPT_COMMON_SUFFIX_NOTHINK}\n\n{PROMPT_CODE_BLOCK.format(code=code)}"
     return prompt.strip()
 
-def get_after_confidence_prompt_text(strategy: str, superforecast: bool) -> str:
+def get_after_confidence_prompt_text(strategy: str, superforecast: bool, thinking: bool) -> str:
     """
     Constructs the text for the 'after' confidence prompt (without code).
 
@@ -132,7 +145,10 @@ def get_after_confidence_prompt_text(strategy: str, superforecast: bool) -> str:
     if superforecast:
         superforecast_prefix = f"{PROMPT_SUPERFORECASTER}\n\n"
 
-    return f"{superforecast_prefix}{strategy_request} {PROMPT_COMMON_SUFFIX}".strip()
+    if thinking:
+        return f"{superforecast_prefix}{strategy_request} {PROMPT_COMMON_SUFFIX_THINK}".strip()
+    else:
+        return f"{superforecast_prefix}{strategy_request} {PROMPT_COMMON_SUFFIX_NOTHINK}".strip()
 
 def load_examples_from_json(file_path: str) -> List[Dict[str, Any]]:
     """
@@ -250,7 +266,7 @@ def extract_standard_confidence(response: str) -> float:
     response = response.strip()
 
     # First look for a line with just a number
-    for line in response.split('\n'):
+    for line in reversed(response.split('\n')):
         line = line.strip()
         if not line:
             continue
@@ -312,7 +328,7 @@ def extract_inverse_confidence(response: str) -> float:
     response = response.strip()
 
     # Look for formats like "1/10", "10", or "10:1"
-    for line in response.split('\n'):
+    for line in reversed(response.split('\n')):
         line = line.strip()
         if not line:
             continue
@@ -374,13 +390,13 @@ def extract_betting_confidence(response: str) -> float:
     Returns:
         The extracted confidence as a float between 0 and 1, or None if extraction fails
     """
-    for line in response.split('\n'):
+    for line in reversed(response.split('\n')):
         line = line.strip()
         if not line:
             continue
 
         # Try to extract a number
-        number_match = re.search(r'^(\d+(?:\.\d+)?)', line)
+        number_match = re.search(r'(\d+(?:\.\d+)?)', line)
         if number_match:
             try:
                 return float(number_match.group(1))
@@ -407,12 +423,12 @@ def extract_onetoten_confidence(response: str) -> float:
     """
     Extract the confidence estimate from a 1-10 scale.
     """
-    for line in response.split('\n'):
+    for line in reversed(response.split('\n')):
         line = line.strip()
         if not line:
             continue
 
-        number_match = re.search(r'^(\d+(?:\.\d+)?)', line)
+        number_match = re.search(r'(\d+(?:\.\d+)?)', line)
         if number_match:
             try:
                 return float(number_match.group(1)) / 10.0
@@ -676,7 +692,7 @@ def save_multiple_evaluations_to_json(evaluations: List[Dict[str, Any]], model_n
     return save_to_json(data, filename, output_dir)
 
 def evaluate_example(client, example: Dict[str, Any], model_name: str,
-                    confidence_strategies: List[str] = None, superforecast: bool = False) -> Dict[str, Any]:
+                    confidence_strategies: List[str] = None, superforecast: bool = False, temperature: float = 0.0, thinking: bool = False) -> Dict[str, Any]:
     """
     Evaluate a single example and return the evaluation results.
 
@@ -690,20 +706,25 @@ def evaluate_example(client, example: Dict[str, Any], model_name: str,
     Returns:
         A dictionary with the evaluation results
     """
+    print(f"Evaluating example with temperature {temperature} and thinking {thinking}")
+    if thinking:
+        print(f"WARNING: Anthropic requires temperature 1.0 for thinking, updating from {temperature}.")
+        temperature = 1.0
+
     # Dictionary to hold confidence results
     confidence_results = {}
 
     # Evaluate "before" confidence for each strategy
     for strategy in confidence_strategies:
-        before_confidence_prompt = get_before_confidence_prompt(strategy, example['code'], superforecast)
+        before_confidence_prompt = get_before_confidence_prompt(strategy, example['code'], superforecast, thinking)
 
         # Query the model
-        before_confidence_response = query_model(client, before_confidence_prompt, model_name, temperature=0.0)
+        before_confidence_response = query_model_thinking(client, before_confidence_prompt, model_name, temperature=temperature, thinking=thinking)
 
         # Extract confidence using the appropriate function
         confidence = None
         if before_confidence_response:
-            confidence = extract_confidence(before_confidence_response, strategy)
+            confidence = extract_confidence(before_confidence_response["content"], strategy)
 
         # Store results (initialize after prompt/response/confidence to None)
         confidence_results[strategy] = {
@@ -721,7 +742,7 @@ def evaluate_example(client, example: Dict[str, Any], model_name: str,
     prompt = EVALUATION_PROMPT_TEMPLATE.format(code=example['code'])
     initial_eval_conversation: StandardConversation = [{"role": "user", "content": prompt}]
     # Get the full updated conversation including the model's first answer
-    eval_conversation = query_model_with_history(client, model_name, initial_eval_conversation[:], temperature=0.0)
+    eval_conversation = query_model_with_history(client, model_name, initial_eval_conversation[:], temperature=temperature, thinking=thinking)
 
     # Check if the evaluation API call was successful
     if len(eval_conversation) <= len(initial_eval_conversation):
@@ -737,37 +758,41 @@ def evaluate_example(client, example: Dict[str, Any], model_name: str,
     expected_answer = example.get('verified_answer', example.get('answer', ''))
 
     # --- Evaluate "after" confidence for each strategy ---
-    # Use the *same conversation* where the model just answered
-    for strategy in confidence_strategies:
-        after_prompt_text = get_after_confidence_prompt_text(strategy, superforecast)
-        after_prompt_message: StandardMessage = {"role": "user", "content": after_prompt_text}
+    # Use the *same conversation* where the model just answered.
+    # In thinking mode, this is kind of pointless, since the model inevitably solves the problem in thinking before giving the initial confidence anyway.
+    if not thinking:
+        for strategy in confidence_strategies:
+            after_prompt_text = get_after_confidence_prompt_text(strategy, superforecast, thinking)
+            after_prompt_message: StandardMessage = {"role": "user", "content": after_prompt_text}
 
-        # Create a *copy* of the conversation to append to, for this specific strategy query
-        current_conversation_for_after_query = eval_conversation[:]
-        current_conversation_for_after_query.append(after_prompt_message)
+            # Create a *copy* of the conversation to append to, for this specific strategy query
+            current_conversation_for_after_query = eval_conversation[:]
+            current_conversation_for_after_query.append(after_prompt_message)
 
-        # Pass the updated conversation history
-        final_conversation = query_model_with_history(client, model_name, current_conversation_for_after_query, temperature=0.0)
+            # Pass the updated conversation history
+            final_conversation = query_model_with_history(client, model_name, current_conversation_for_after_query, temperature=temperature, thinking=thinking)
 
-        # Extract confidence using the appropriate function
-        after_confidence = None
-        after_confidence_response_text = None
-        # Check if the API call was successful and extract the last message content
-        if len(final_conversation) > len(current_conversation_for_after_query) and final_conversation[-1]["role"] == "assistant":
-            after_confidence_response_text = final_conversation[-1].get("content", "")
-            if after_confidence_response_text:
-                after_confidence = extract_confidence(after_confidence_response_text, strategy)
+            # Extract confidence using the appropriate function
+            after_confidence = None
+            after_confidence_response_text = None
+            # Check if the API call was successful and extract the last message content
+            if len(final_conversation) > len(current_conversation_for_after_query) and final_conversation[-1]["role"] == "assistant":
+                after_confidence_response_text = final_conversation[-1].get("content", "")
+                if after_confidence_response_text:
+                    after_confidence = extract_confidence(after_confidence_response_text, strategy)
 
-        # Store results
-        confidence_results[strategy]["after_prompt"] = after_prompt_text # Store the text, not the message object
-        confidence_results[strategy]["after_response"] = after_confidence_response_text
-        confidence_results[strategy]["after_confidence"] = after_confidence
+            # Store results
+            confidence_results[strategy]["after_prompt"] = after_prompt_text # Store the text, not the message object
+            confidence_results[strategy]["after_response"] = final_conversation[-1]
+            confidence_results[strategy]["after_confidence"] = after_confidence
 
     # Create evaluation result with combined confidence data
     result = {
         "example": example,
         "prompt": prompt,
-        "full_response": full_response_text, # The initial response to the eval prompt
+        "temperature": temperature,
+        "thinking": thinking,
+        "full_response": model_answer_message, # The initial response to the eval prompt
         "extracted_answer": extracted_answer,
         "expected_answer": expected_answer,
         "match": extracted_answer.strip() == expected_answer.strip(),
@@ -779,7 +804,8 @@ def evaluate_example(client, example: Dict[str, Any], model_name: str,
     # Add first confidence as the primary one for backward compatibility
     primary_strategy = confidence_strategies[0]
     result["before_confidence"] = confidence_results[primary_strategy]["before_confidence"]
-    result["after_confidence"] = confidence_results[primary_strategy]["after_confidence"]
+    if not thinking:
+        result["after_confidence"] = confidence_results[primary_strategy]["after_confidence"]
     result["confidence"] = result["before_confidence"]  # Keep for backward compatibility
 
     return result
@@ -793,8 +819,14 @@ def main():
                         help='API provider to use (openai or anthropic or google or openrouter)')
     parser.add_argument('--model', type=str,
                         help='Model name to use (e.g., gpt-4 for OpenAI, claude-3-opus-20240229 for Anthropic)')
+    parser.add_argument('--temperature', type=float, default=0.0,
+                        help='Temperature for the model (0.0-1.0)')
+    parser.add_argument('--thinking', action='store_true',
+                        help='Use thinking mode for the model (anthropic only for now)')
     parser.add_argument('--language', type=str,
                         help='Filter examples by language (e.g., Python, C, Javascript)')
+    parser.add_argument('--difficulty', type=int,
+                        help='Filter examples by difficulty (1-10)')
     parser.add_argument('--list-models', action='store_true',
                         help='List available models from the specified provider and exit')
     parser.add_argument('--dry-run', action='store_true',
@@ -853,10 +885,16 @@ def main():
     filtered_examples = examples
     if args.language:
         lang_lower = args.language.lower()
-        matching_examples = [ex for ex in examples if ex.get('language', '').lower() == lang_lower]
+        matching_examples = [ex for ex in filtered_examples if ex.get('language', '').lower() == lang_lower]
         if not matching_examples:
             print(f"No examples found for language: {args.language}")
             print(f"Available languages: {', '.join(set(ex.get('language', '') for ex in examples))}")
+            return
+        filtered_examples = matching_examples
+    if args.difficulty:
+        matching_examples = [ex for ex in filtered_examples if ex.get('difficulty', 0) == args.difficulty]
+        if not matching_examples:
+            print(f"No examples found for difficulty: {args.difficulty}")
             return
         filtered_examples = matching_examples
 
@@ -930,7 +968,7 @@ def main():
     for i, example in enumerate(examples_to_run, 1):
         print(f"\n[{i}/{len(examples_to_run)}] Evaluating {example['language']} example (difficulty {example.get('difficulty', '?')})...", end="", flush=True)
 
-        evaluation = evaluate_example(client, example, args.model, confidence_strategies, args.superforecast)
+        evaluation = evaluate_example(client, example, args.model, confidence_strategies, args.superforecast, args.temperature, args.thinking)
         if evaluation:
             evaluations.append(evaluation)
 
