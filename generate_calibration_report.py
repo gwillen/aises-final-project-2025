@@ -8,6 +8,7 @@ Creates a calibration graph for each confidence strategy found in the input file
 import os
 import json
 import argparse
+from scipy.stats import beta, norm
 import numpy as np
 import matplotlib.pyplot as plt
 from typing import List, Dict, Any, Tuple, Optional
@@ -84,10 +85,58 @@ def extract_confidence_data(
 
     return confidence_scores, actual_outcomes
 
+def clopper_pearson(outcomes: List[bool], alpha: float = 0.05) -> List[float]:
+    """
+    Calculate error bars using the Clopper-Pearson confidence interval for a binomial proportion.
+    https://en.wikipedia.org/wiki/Binomial_proportion_confidence_interval#Clopper%E2%80%93Pearson_interval
+
+    Args:
+        count: Number of successes in the sample.
+        outcomes: List of boolean outcomes (True for correct, False for incorrect).
+        frac_correct: Fraction of successes in the sample.
+        alpha: Confidence level (default: 0.05 for 95% confidence interval).
+
+    Returns:
+        A list containing the lower and upper bounds of the confidence interval.
+    """
+    # calculate error bars using clopper-pearson
+
+    k = np.sum(outcomes)
+    n = len(outcomes)
+    frac_correct = k / n
+
+    p_u, p_o = beta.ppf([alpha / 2, 1 - alpha / 2], [k, k + 1], [n - k + 1, n - k])
+    if np.isnan(p_o):
+        p_o = 1
+    if np.isnan(p_u):
+        p_u = 0
+    return [np.abs(p_u-frac_correct), np.abs(p_o-frac_correct)]
+
+def wilson_interval(outcomes: List[bool], alpha: float = 0.05) -> List[float]:
+    """
+    Calculate error bars using the Wilson interval for a binomial proportion.
+    https://en.wikipedia.org/wiki/Binomial_proportion_confidence_interval#Wilson_score_interval
+    """
+    k = np.sum(outcomes)
+    n = len(outcomes)
+    frac_correct = k / n
+
+    z = norm.ppf(1 - alpha / 2)
+    p_mid = (k + z**2 / 2) / (n + z**2)
+    p_o = p_mid + (z / (n + z**2)) * np.sqrt((k * (n-k) / n) + (z**2 / 4))
+    p_u = p_mid - (z / (n + z**2)) * np.sqrt((k * (n-k) / n) + (z**2 / 4))
+
+    print(f"k: {k}, n: {n}, frac_correct: {frac_correct}")
+    print(f"Wilson interval: {p_u}, {p_o}")
+    print(f"Wilson interval error: {np.abs(p_u-frac_correct)}, {np.abs(p_o-frac_correct)}")
+
+    return [np.abs(p_u-frac_correct), np.abs(p_o-frac_correct)]
+
 def plot_calibration_graph(
     confidence_scores: List[float],
     actual_outcomes: List[bool],
     strategy_name: str,
+    superforecast: bool,
     time_point: str,
     model_name: str,
     provider_name: str,
@@ -113,6 +162,8 @@ def plot_calibration_graph(
         print(f"Warning: No valid confidence data found for strategy '{strategy_name}' ({time_point}). Skipping plot.")
         return
 
+    superforecast_str = "(superforecast persona prompt)" if superforecast else "(no persona prompt)"
+
     scores_array = np.array(confidence_scores)
     outcomes_array = np.array(actual_outcomes)
 
@@ -126,7 +177,7 @@ def plot_calibration_graph(
     mean_confidences = []
     fraction_correct = []
     bin_counts = []
-
+    error_bars = []
     for i in range(num_bins):
         in_bin = (bin_indices == i)
         count = np.sum(in_bin)
@@ -135,17 +186,45 @@ def plot_calibration_graph(
         if count > 0:
             mean_conf = np.mean(scores_array[in_bin])
             frac_correct = np.mean(outcomes_array[in_bin])
+
             mean_confidences.append(mean_conf)
             fraction_correct.append(frac_correct)
+
+            #err5 = clopper_pearson(outcomes_array[in_bin], 0.05)
+            #err10 = clopper_pearson(outcomes_array[in_bin], 0.1)
+            #err20 = clopper_pearson(outcomes_array[in_bin], 0.2)
+            err5_wilson = wilson_interval(outcomes_array[in_bin], 0.05)
+            err10_wilson = wilson_interval(outcomes_array[in_bin], 0.1)
+            err20_wilson = wilson_interval(outcomes_array[in_bin], 0.2)
+            error_bars.append([err5_wilson, err10_wilson, err20_wilson])
+
+            print(f"Bin {i}:")
+            print(f"count: {count}")
+            print(f"Error bars: {error_bars[-1]}")
+            print(f"Mean confidence: {mean_conf}")
+            print(f"Fraction correct: {frac_correct}")
+
         else:
-            # Handle empty bins - append NaN or use bin_centers/0? Let's skip plotting them.
             # Append values that allow plotting vs bin_centers if needed
              mean_confidences.append(bin_centers[i]) # Use bin center for x if empty
              fraction_correct.append(np.nan) # Use NaN for y if empty
+             error_bars.append([[np.nan, np.nan], [np.nan, np.nan], [np.nan, np.nan]])
 
     # Filter out bins with no data for plotting the curve
-    plot_mean_conf = [mc for i, mc in enumerate(mean_confidences) if bin_counts[i] > 0]
+    plot_mean_conf = [mc for i, mc in enumerate(bin_centers) if bin_counts[i] > 0]
     plot_frac_correct = [fc for i, fc in enumerate(fraction_correct) if bin_counts[i] > 0]
+    plot_error_bars = [eb for i, eb in enumerate(error_bars) if bin_counts[i] > 0]
+
+    # transpose error bars
+    # currently: bin x width x [hi, low]
+    print(f"plot_error_bars: {np.array(plot_error_bars).shape}")
+    # want: width x [hi, low] x bin
+    plot_error_bars = np.array(plot_error_bars).transpose(1, 2, 0).tolist()
+    print(f"plot_error_bars: {np.array(plot_error_bars).shape}")
+    #plot_error_bars = np.array(plot_error_bars).T.tolist()
+
+    draw_error_bars = True
+    draw_counts = True
 
     plt.figure(figsize=(8, 8))
     # Plot perfect calibration line
@@ -153,17 +232,20 @@ def plot_calibration_graph(
     # Plot calibration curve
     if plot_mean_conf: # Only plot if there's data
         plt.plot(plot_mean_conf, plot_frac_correct, 'o-', label=f'{strategy_name.capitalize()} ({time_point.capitalize()})', markersize=8)
-
+        if draw_error_bars:
+            plt.errorbar(plot_mean_conf, plot_frac_correct, yerr=plot_error_bars[0], fmt='none', ecolor='black', capsize=5)
+            plt.errorbar(plot_mean_conf, plot_frac_correct, yerr=plot_error_bars[1], fmt='none', ecolor='red', capsize=5)
+            plt.errorbar(plot_mean_conf, plot_frac_correct, yerr=plot_error_bars[2], fmt='none', ecolor='blue', capsize=5)
     # Add counts to the plot (optional, can be noisy)
-    # for i in range(num_bins):
-    #     if bin_counts[i] > 0 and not np.isnan(fraction_correct[i]):
-    #         plt.text(mean_confidences[i], fraction_correct[i] + 0.02, f'n={bin_counts[i]}', ha='center', va='bottom', fontsize=8)
-
+    if draw_counts:
+        for i in range(num_bins):
+            if bin_counts[i] > 0 and not np.isnan(fraction_correct[i]):
+             plt.text(mean_confidences[i], fraction_correct[i] + 0.02, f'n={bin_counts[i]}', ha='center', va='bottom', fontsize=8)
 
     plt.xlabel("Mean Predicted Confidence in Bin")
     plt.ylabel("Fraction of Positives (Actual Accuracy in Bin)")
     plt.title(f"Calibration Curve - {provider_name} {model_name} \
-Strategy: {strategy_name.capitalize()} ({time_point.capitalize()})")
+Strategy: {strategy_name.capitalize()} ({time_point.capitalize()}) {superforecast_str}")
     plt.xlim([0, 1])
     plt.ylim([0, 1])
     plt.grid(True, linestyle='--', alpha=0.6)
@@ -238,6 +320,14 @@ def main():
     print(f"Processing strategies for calibration plots: {', '.join(target_strategies)}")
     print(f"Generating reports for {provider_name} / {model_name}")
 
+    # make sure that evaluations[i].superforecast is the same for all i, then use that value
+    #   to determine if we should plot the calibration graph
+    superforecast = evaluations[0].get("superforecast")
+    superforecast_values = [e.get("superforecast") for e in evaluations]
+    if not all(v == superforecast for v in superforecast_values):
+        print("ERROR: superforecast values are not the same for all evaluations. Fix the code")
+        return
+
     for strategy in target_strategies:
         print(f"Processing strategy: {strategy}")
         for time_point in ['before', 'after']:
@@ -248,6 +338,7 @@ def main():
                 scores,
                 outcomes,
                 strategy,
+                superforecast,
                 time_point,
                 model_name,
                 provider_name,
