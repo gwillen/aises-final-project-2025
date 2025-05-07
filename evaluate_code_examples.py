@@ -28,9 +28,27 @@ from ai_utils import (
     StandardMessage,
 )
 
-EVALUATION_PROMPT_TEMPLATE = """\
+EVALUATION_PROMPT_TEMPLATE_NOTHINK = """\
 What result does this code output or return? Please provide only your best immediate guess \
-at the final answer, on a line by itself; no reasoning, analysis, or commentary.
+at the final answer, on a line by itself; no reasoning, analysis, or commentary. Use the \
+following format:
+
+```
+ANSWER: [final answer]
+```
+
+```
+{code}
+```
+"""
+
+EVALUATION_PROMPT_TEMPLATE_THINK = """\
+What result does this code output or return? Please end your response with your \
+final answer, on a line by itself, in the following format:
+
+```
+ANSWER: [final answer]
+```
 
 ```
 {code}
@@ -38,18 +56,28 @@ at the final answer, on a line by itself; no reasoning, analysis, or commentary.
 """
 
 # --- Confidence Prompt Components ---
-PROMPT_COMMON_SUFFIX_NOTHINK = "Again, please give only the estimate, on a line by " \
-    "itself, without reasoning, analysis, or commentary."
-PROMPT_COMMON_SUFFIX_THINK = "Again, please end with the estimate, on a line by " \
-    "itself."
+PROMPT_COMMON_SUFFIX_NOTHINK = """\
+Please give the confidence estimate, on a line by itself, without reasoning, analysis, or commentary, in the following format:
+
+```
+CONFIDENCE: [confidence estimate]
+```
+"""
+PROMPT_COMMON_SUFFIX_THINK = """\
+Please give the confidence estimate, on a line by itself, in the following format:
+
+```
+CONFIDENCE: [confidence estimate]
+```
+"""
 
 PROMPT_CODE_BLOCK = "```\n{code}\n```"
 
-PROMPT_SUPERFORECASTER = "You are a superforecaster. You are excel at " \
+PROMPT_SUPERFORECASTEROLD_20250507 = "You are a superforecaster. You are excel at " \
         "pattern recognition, cognitive flexibility, and open-mindedness. " \
         "You are well-calibrated, and you are careful to avoid being over- " \
         "or under-confident in your beliefs."
-PROMPT_SUPERFORECASTER_v2 = "You are a superforecaster. You are excel at " \
+PROMPT_SUPERFORECASTER = "You are a superforecaster. You are excel at " \
         "pattern recognition, cognitive flexibility, and open-mindedness. " \
         "You are well-calibrated, and you are careful to avoid being over- " \
         "or under-confident in your beliefs. You give precise estimates, " \
@@ -230,20 +258,13 @@ def extract_final_answer(response: str) -> str:
     Returns:
         The extracted answer
     """
-    # Look for the first line that's not empty and doesn't contain explanations
-    explanation_indicators = ["because", "since", "as", "explanation", "reasoning", "analysis", "therefore", "thus"]
-
     for line in response.strip().split('\n'):
         line = line.strip()
         if not line:
             continue
 
-        # Check if this line looks like an explanation
-        if any(indicator in line.lower() for indicator in explanation_indicators):
-            continue
-
-        # Return the first line that doesn't look like an explanation
-        return line
+        if line.startswith("ANSWER: "):
+            return line[len("ANSWER: "):].strip()
 
     # If we couldn't find a good line, just return the first non-empty line
     for line in response.strip().split('\n'):
@@ -739,7 +760,10 @@ def evaluate_example(client, example: Dict[str, Any], model_name: str,
 
     # --- Now evaluate the actual example ---
     # Start a new conversation for the evaluation itself
-    prompt = EVALUATION_PROMPT_TEMPLATE.format(code=example['code'])
+    if thinking:
+        prompt = EVALUATION_PROMPT_TEMPLATE_THINK.format(code=example['code'])
+    else:
+        prompt = EVALUATION_PROMPT_TEMPLATE_NOTHINK.format(code=example['code'])
     initial_eval_conversation: StandardConversation = [{"role": "user", "content": prompt}]
     # Get the full updated conversation including the model's first answer
     eval_conversation = query_model_with_history(client, model_name, initial_eval_conversation[:], temperature=temperature, thinking=thinking)
@@ -831,8 +855,8 @@ def main():
                         help='List available models from the specified provider and exit')
     parser.add_argument('--dry-run', action='store_true',
                         help='Show what would be sent to the API without actually making the call')
-    parser.add_argument('--run-examples', type=int, default=1,
-                        help='Run evaluation on the specified number of examples, or -1 for all')
+    parser.add_argument('--run-examples', type=str, default='all',
+                        help='Run evaluation on the specified range of examples ("M-N" or "all", default is all)')
     parser.add_argument('--confidence-strategies', type=str,
                         help=f'Comma-separated list of confidence strategies to use. Available: {", ".join(CONFIDENCE_STRATEGY_DEFINITIONS.keys())}')
     parser.add_argument('--superforecast', action='store_true',
@@ -899,18 +923,24 @@ def main():
         filtered_examples = matching_examples
 
     examples_to_run = []
-    if args.run_examples == -1:
+    if args.run_examples == 'all':
         examples_to_run = filtered_examples
         if not examples_to_run:
             print("No examples selected to run.")
             return
         print(f"Preparing to evaluate {len(examples_to_run)} examples...")
     else:
-        examples_to_run = filtered_examples[:args.run_examples]
+        # Parse the range
+        try:
+            start, end = map(int, args.run_examples.split('-'))
+        except ValueError:
+            print("Invalid range format. Use 'M-N' or 'all'.")
+            return
+        examples_to_run = filtered_examples[start:end]
         if not examples_to_run:
             print("No examples selected to run.")
             return
-        print(f"Selected {args.run_examples} examples to evaluate.")
+        print(f"Selected {len(examples_to_run)} examples to evaluate.")
 
     # --- Handle Dry Run ---
     if args.dry_run:
@@ -936,13 +966,16 @@ def main():
         for i, strategy in enumerate(confidence_strategies):
             print(f"\n=== Confidence Prompt {i+1}: {strategy} (Before Answer) ===")
             print("=" * 40)
-            print(get_before_confidence_prompt(strategy, first_example['code'], args.superforecast))
+            print(get_before_confidence_prompt(strategy, first_example['code'], args.superforecast, args.thinking))
             print("=" * 40)
 
         # Show evaluation prompt
         print("\n=== Evaluation Prompt ===")
         print("=" * 40)
-        print(EVALUATION_PROMPT_TEMPLATE.format(code=first_example['code']))
+        if args.thinking:
+            print(EVALUATION_PROMPT_TEMPLATE_THINK.format(code=first_example['code']))
+        else:
+            print(EVALUATION_PROMPT_TEMPLATE_NOTHINK.format(code=first_example['code']))
         print("=" * 40)
 
         # Show 'after' confidence prompts
@@ -950,7 +983,7 @@ def main():
             print(f"\n=== Confidence Prompt {i+1}: {strategy} (After Answer) ===")
             print("=" * 40)
             # Construct the text dynamically for dry run display
-            print(get_after_confidence_prompt_text(strategy, args.superforecast))
+            print(get_after_confidence_prompt_text(strategy, args.superforecast, args.thinking))
             print("=" * 40)
 
         print(f"\nWould evaluate {len(examples_to_run)} example(s) in total.")
