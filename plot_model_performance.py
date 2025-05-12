@@ -35,96 +35,101 @@ MODEL_PERFORMANCE_DATA = [
 CATEGORIES = ["Overall", "C", "Python", "JS"]
 OUTPUT_DIR = "output/calibration_graphs"
 
-# Define color pairs (light for confidence, dark for correctness) for each model
-MODEL_COLORS = [
-    {'short_name': "GPT-4.1", 'confidence': 'lightskyblue', 'correctness': 'dodgerblue'},
-    {'short_name': "Claude (no think)", 'confidence': 'palegreen', 'correctness': 'limegreen'},
-    {'short_name': "Claude (thinking)", 'confidence': 'lightcoral', 'correctness': 'indianred'},
-    {'short_name': "Gemma 3 27B", 'confidence': 'plum', 'correctness': 'mediumorchid'}
+# Define a color for each category/language
+CATEGORY_COLORS = [
+    {'category_name': "Overall", 'color': 'skyblue'},
+    {'category_name': "C", 'color': 'lightcoral'},
+    {'category_name': "Python", 'color': 'lightgreen'},
+    {'category_name': "JS", 'color': 'gold'}
 ]
 
-def plot_grouped_bar_chart(performance_data, categories, model_colors_config, output_directory):
+def plot_metric_bar_chart(performance_data, categories, category_colors_config, output_directory, metric_to_plot, chart_title):
     """
-    Generates and saves a single grouped bar chart showing model confidence
-    and correctness across different categories.
+    Generates and saves a grouped bar chart for a single metric (confidence or correctness)
+    showing model performance across different categories, grouped by model.
 
     Args:
         performance_data (list): List of dictionaries with model performance data.
         categories (list): List of strings for categories (e.g., "Overall", "C").
-        model_colors_config (list): List of dictionaries defining colors for each model.
+        category_colors_config (list): List of dictionaries defining a color for each category.
         output_directory (str): Directory to save the plot image.
+        metric_to_plot (str): The metric to plot ("confidence" or "correctness").
+        chart_title (str): The title for the chart.
     """
-    num_categories = len(categories)
     num_models = len(performance_data)
+    num_categories = len(categories)
     model_short_names = [data['model_short'] for data in performance_data]
 
-    # Calculate bar positions
-    x_main_ticks = np.arange(num_categories)  # Center positions for each category group
-    total_bars_in_group = num_models * 2  # Each model has a confidence and a correctness bar
-    bar_width = 0.8 / total_bars_in_group # Dynamically calculate bar width to fit (0.8 is group width)
-                                         # Adjust 0.8 if more/less spacing is desired between groups
+    x_main_ticks = np.arange(num_models)  # Center positions for each model group
+    total_bars_in_group = num_categories  # One bar per category within a model's group
+    bar_width = 0.8 / total_bars_in_group # Width of a single bar
 
-    fig, ax = plt.subplots(figsize=(16, 9)) # Adjusted figure size for better readability
+    fig, ax = plt.subplots(figsize=(14, 8)) # Adjusted figure size
 
-    for i, model_data_entry in enumerate(performance_data):
-        model_name = model_data_entry['model_short']
+    for cat_idx, category_name in enumerate(categories):
+        # Find the color for the current category
+        current_category_color_info = next((cc for cc in category_colors_config if cc['category_name'] == category_name), None)
+        if not current_category_color_info:
+            print(f"Warning: Color not found for category {category_name}. Using default.")
+            category_color = 'gray'
+        else:
+            category_color = current_category_color_info['color']
 
-        # Find the color configuration for the current model
-        # This assumes model_short_names from performance_data matches model_colors_config ordering
-        # Or, more robustly, match by 'short_name' if order isn't guaranteed.
-        # For this script, we assume the order in MODEL_PERFORMANCE_DATA and MODEL_COLORS matches.
-        current_model_colors = model_colors_config[i]
+        # Extract metric values for the current category across all models
+        metric_values_for_category = [model_data[metric_to_plot][category_name] for model_data in performance_data]
 
-        confidence_values = [model_data_entry['confidence'][cat] for cat in categories]
-        correctness_values = [model_data_entry['correctness'][cat] for cat in categories]
+        # Calculate offset for this category's bars across all model groups
+        offset = (cat_idx - total_bars_in_group / 2) * bar_width + bar_width / 2
+        bar_positions = x_main_ticks + offset
 
-        # Calculate offset for this model's bars within each group
-        # The term `-(total_bars_in_group / 2)` centers the whole group of bars.
-        # `+ 0.5 * bar_width` ensures the first bar starts at the edge of its allocated space.
-        # `i * 2 * bar_width` shifts to the start of the i-th model's pair.
-        base_offset_for_model_pair = (i * 2 - total_bars_in_group / 2) * bar_width
-
-        conf_bar_positions = x_main_ticks + base_offset_for_model_pair + (0.5 * bar_width)
-        corr_bar_positions = x_main_ticks + base_offset_for_model_pair + (1.5 * bar_width)
-
-        ax.bar(conf_bar_positions, confidence_values, bar_width,
-               label=f'{model_name} Confidence', color=current_model_colors['confidence'],
-               edgecolor='grey') # Added edgecolor for better separation
-        ax.bar(corr_bar_positions, correctness_values, bar_width,
-               label=f'{model_name} Correctness', color=current_model_colors['correctness'],
-               edgecolor='grey') # Added edgecolor
+        ax.bar(bar_positions, metric_values_for_category, bar_width,
+               label=category_name, color=category_color,
+               edgecolor='black')
 
     # Set labels, title, and ticks
-    ax.set_ylabel('Percentage (%)', fontsize=14)
-    ax.set_title('Model Performance: Confidence vs. Actual Correctness by Category', fontsize=16)
+    ax.set_xlabel('Model', fontsize=12)
+    ax.set_ylabel('Percentage (%)', fontsize=12)
+    ax.set_title(chart_title, fontsize=14)
     ax.set_xticks(x_main_ticks)
-    ax.set_xticklabels(categories, fontsize=12)
-    ax.set_ylim(0, 105) # Ensure y-axis goes up to at least 100%
+    ax.set_xticklabels(model_short_names, fontsize=10, rotation=15, ha="right")
 
-    ax.legend(title='Model & Metric', bbox_to_anchor=(1.02, 1), loc='upper left', fontsize=10)
+    if metric_to_plot == "confidence":
+        ax.set_ylim(90, 105)
+        # Add a text annotation to indicate the Y-axis break/start point
+        # Position it relative to the axes (0,0 is bottom-left, 1,1 is top-right of axes)
+        ax.text(0.01, 0.01, 'Note: Y-axis starts at 90%',
+                transform=ax.transAxes, fontsize=8, va='bottom', ha='left',
+                bbox=dict(boxstyle='round,pad=0.3', fc='yellow', alpha=0.5))
+    else:
+        ax.set_ylim(0, 105)
+
+    ax.legend(title='Category/Language', bbox_to_anchor=(1.02, 1), loc='upper left', fontsize=9)
     ax.grid(True, axis='y', linestyle='--', alpha=0.7)
 
-    plt.tight_layout(rect=[0, 0, 0.88, 1]) # Adjust layout to make space for legend outside
+    plt.tight_layout(rect=[0, 0, 0.88, 1]) # Adjust layout for legend
 
-    plot_filename = os.path.join(output_directory, "model_performance_barchart.png")
+    filename_metric_part = metric_to_plot.lower().replace(' ', '_')
+    plot_filename = os.path.join(output_directory, f"model_{filename_metric_part}_barchart_by_model.png")
     plt.savefig(plot_filename)
-    print(f"Saved grouped bar chart: {plot_filename}")
+    print(f"Saved bar chart: {plot_filename}")
     plt.close(fig)
 
 def main():
     """
-    Main function to generate the grouped bar chart.
+    Main function to generate the bar charts for confidence and correctness, grouped by model.
     """
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     print(f"Output directory: {os.path.abspath(OUTPUT_DIR)}")
 
-    # Ensure MODEL_COLORS matches the order and models in MODEL_PERFORMANCE_DATA
-    # For this script, we assume they align based on their definition order.
-    # A more robust solution might involve matching by model_short_name if data sources could vary.
+    plot_metric_bar_chart(MODEL_PERFORMANCE_DATA, CATEGORIES, CATEGORY_COLORS, OUTPUT_DIR,
+                          metric_to_plot="confidence",
+                          chart_title="Model Confidence")
 
-    plot_grouped_bar_chart(MODEL_PERFORMANCE_DATA, CATEGORIES, MODEL_COLORS, OUTPUT_DIR)
+    plot_metric_bar_chart(MODEL_PERFORMANCE_DATA, CATEGORIES, CATEGORY_COLORS, OUTPUT_DIR,
+                          metric_to_plot="correctness",
+                          chart_title="Model Correctness")
 
-    print("\nGrouped bar chart generated successfully.")
+    print("\nAll bar charts generated successfully.")
 
 if __name__ == "__main__":
     main()

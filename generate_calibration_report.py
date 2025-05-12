@@ -138,10 +138,8 @@ def plot_calibration_graph(
     strategy_name: str,
     superforecast: bool,
     time_point: str,
-    model_name: str,
-    provider_name: str,
+    model_names: List[str],
     output_dir: str,
-    input_filename_base: str,
     num_bins: int = 10
 ) -> None:
     """
@@ -152,34 +150,17 @@ def plot_calibration_graph(
         actual_outcomes: List of actual outcomes (True for correct, False for incorrect).
         strategy_name: Name of the confidence strategy.
         time_point: 'before' or 'after'.
-        model_name: Name of the model evaluated.
-        provider_name: Name of the provider used.
+        model_names: List of model names.
         output_dir: Directory to save the plot.
-        input_filename_base: Base name of the input file for constructing output filename.
         num_bins: Number of bins to divide the confidence scores into.
     """
     if not confidence_scores:
         print(f"Warning: No valid confidence data found for strategy '{strategy_name}' ({time_point}). Skipping plot.")
         return
 
-    superforecast_str = "(superforecast persona prompt)" if superforecast else "(no persona prompt)"
+    #superforecast_str = "(superforecast persona prompt)" if superforecast else "(no persona prompt)"
 
     scores_array = np.array(confidence_scores)
-
-    # XXX: correct the confidence scores for formatting issues. This is a
-    #   terrible hack and I'm sorry. :-(
-    # For scores between 0 and 1, leave them alone. For scores betweeen 25
-    #   and 100, which are obviously misparsed percentages, divide them by 100.
-    # The model is never so unconfident that a score between 1 and 25 would
-    #   make sense, so give up if we see that.
-    for i, score in enumerate(scores_array):
-        if score >= 25 and score <= 100:
-            scores_array[i] = score / 100
-        elif score >= 0 and score <= 1:
-            pass
-        else:
-            raise ValueError(f"Strange confidence score: {score} for example {i}")
-
     outcomes_array = np.array(actual_outcomes)
 
     # Define bins (e.g., 0.0-0.1, 0.1-0.2, ..., 0.9-1.0)
@@ -241,6 +222,8 @@ def plot_calibration_graph(
     draw_error_bars = True
     draw_counts = True
 
+    # make the font much larger:
+    plt.rcParams.update({'font.size': 16})
     plt.figure(figsize=(8, 8))
     # Plot perfect calibration line
     plt.plot([0, 1], [0, 1], 'k:', label='Perfect Calibration')
@@ -257,10 +240,13 @@ def plot_calibration_graph(
             if bin_counts[i] > 0 and not np.isnan(fraction_correct[i]):
              plt.text(mean_confidences[i], fraction_correct[i] + 0.02, f'n={bin_counts[i]}', ha='center', va='bottom', fontsize=8)
 
+    assert len(model_names) == 1, f"Expected exactly one model name, got {len(model_names)}"
+    model_name = list(model_names)[0]
+
     plt.xlabel("Mean Predicted Confidence in Bin")
     plt.ylabel("Fraction of Positives (Actual Accuracy in Bin)")
-    plt.title(f"Calibration Curve - {provider_name} {model_name} \
-Strategy: {strategy_name.capitalize()} ({time_point.capitalize()}) {superforecast_str}")
+    plt.title(f"{model_name} \
+({strategy_name} / {time_point})")
     plt.xlim([0, 1])
     plt.ylim([0, 1])
     plt.grid(True, linestyle='--', alpha=0.6)
@@ -269,7 +255,7 @@ Strategy: {strategy_name.capitalize()} ({time_point.capitalize()}) {superforecas
 
     # Save the plot
     os.makedirs(output_dir, exist_ok=True)
-    filename = f"calibration_{input_filename_base}_{strategy_name}_{time_point}.png"
+    filename = f"{strategy_name}_{time_point}.png"
     filepath = os.path.join(output_dir, filename)
     try:
         plt.savefig(filepath)
@@ -278,11 +264,14 @@ Strategy: {strategy_name.capitalize()} ({time_point.capitalize()}) {superforecas
         print(f"Error saving plot to {filepath}: {e}")
     plt.close() # Close the figure to free memory
 
+# XXX
+time_points = ['before'] # XXX , 'after']
+
 def main():
     """Main function to parse arguments and generate reports."""
     parser = argparse.ArgumentParser(description='Generate calibration graphs from evaluation data.')
-    parser.add_argument('--input-file', required=True,
-                        help='Path to the batch evaluation JSON file.')
+    parser.add_argument('--input-files', required=True,
+                        help='Path to the batch evaluation JSON files, separated by commas.')
     parser.add_argument('--output-dir', default='output/reports',
                         help='Base directory to save the generated report folders (default: output/reports).')
     parser.add_argument('--bins', type=int, default=20,
@@ -290,19 +279,25 @@ def main():
 
     args = parser.parse_args()
 
-    print(f"Loading evaluation data from: {args.input_file}")
-    data = load_evaluation_data(args.input_file)
-    if not data:
-        return
+    evaluations = []
+    strategies = set()
+    model_names = set()
+    input_filename_bases = []
 
-    evaluations = data.get("evaluations", [])
-    strategies = data.get("confidence_strategies", [])
-    model_name = data.get("model", "unknown_model")
-    provider_name = data.get("provider", "unknown_provider")
-    input_filename_base = os.path.splitext(os.path.basename(args.input_file))[0]
+    input_files = args.input_files.split(',')
+    for input_file in input_files:
+        print(f"Loading evaluation data from: {input_file}")
+        data = load_evaluation_data(input_file)
+        if not data:
+            return
+        evaluations.extend(data.get("evaluations", []))
+        strategies.update(data.get("confidence_strategies", []))
+        model_names.add(data.get("model", "unknown_model"))
+        input_filename_bases.append(os.path.splitext(os.path.basename(input_file))[0])
 
+    output_dirname = "___".join(input_filename_bases)
     # Create a run-specific output directory
-    run_output_dir = os.path.join(args.output_dir, input_filename_base)
+    run_output_dir = os.path.join(args.output_dir, output_dirname)
     try:
         os.makedirs(run_output_dir, exist_ok=True)
         print(f"Ensured output directory for this run: {run_output_dir}")
@@ -333,7 +328,7 @@ def main():
 
     print(f"Found {len(evaluations)} evaluations.")
     print(f"Processing strategies for calibration plots: {', '.join(target_strategies)}")
-    print(f"Generating reports for {provider_name} / {model_name}")
+    print(f"Generating reports for {model_names}")
 
     # make sure that evaluations[i].superforecast is the same for all i, then use that value
     #   to determine if we should plot the calibration graph
@@ -343,9 +338,31 @@ def main():
         print("ERROR: superforecast values are not the same for all evaluations. Fix the code")
         return
 
+    # XXX: correct the confidence scores for formatting issues. This is a
+    #   terrible hack and I'm sorry. :-(
+    # For scores between 0 and 1, leave them alone. For scores betweeen 25
+    #   and 100, which are obviously misparsed percentages, divide them by 100.
+    # The model is never so unconfident that a score between 1 and 25 would
+    #   make sense, so give up if we see that.
+    #del evaluations[333] # XXX
+
+    for i, eval in enumerate(evaluations):
+        for strategy in eval['confidence_results'].keys():
+            for time_point in time_points:
+                confidence = eval['confidence_results'][strategy][time_point + '_confidence']
+                if confidence is None:
+                    print(f"Warning: confidence is None for example {i}, strategy {strategy}, time_point {time_point}")
+                    continue
+                if confidence >= 25 and confidence <= 100:
+                    eval['confidence_results'][strategy][time_point + '_confidence'] = confidence / 100
+                elif confidence >= 0 and confidence <= 1:
+                    pass
+                else:
+                    raise ValueError(f"Strange confidence score: {confidence} for example {i}")
+
     for strategy in target_strategies:
         print(f"Processing strategy: {strategy}")
-        for time_point in ['before', 'after']:
+        for time_point in time_points:
             print(f"  Processing time point: {time_point}")
             scores, outcomes = extract_confidence_data(evaluations, strategy, time_point)
             print(f"    Found {len(scores)} valid data points.")
@@ -355,14 +372,133 @@ def main():
                 strategy,
                 superforecast,
                 time_point,
-                model_name,
-                provider_name,
+                model_names,
                 run_output_dir,
-                input_filename_base,
                 num_bins=args.bins
             )
 
+    # Now, tabulate stats by various axes: each example has a language, a difficulty, and an original model. See how we did on each, and overall.
+    # We don't need to draw a whole graph for each: just make tables.
+    display_stats(evaluations, strategies)
+
     print("Report generation complete.")
+
+def display_stats(evaluations, strategies):
+    # Create a dictionary to store stats by language, difficulty, and original model
+    stats = {
+        'language': {},
+        'difficulty': {},
+        'original_model': {}
+    }
+
+    # Process each evaluation
+    for eval in evaluations:
+        language = eval['example']['language'].lower()
+        difficulty = eval['example']['difficulty']
+        original_model = eval['example']['original_model']
+
+        if 'overall' not in stats:
+            stats['overall'] = {
+                'total': 0,
+                'correct': 0,
+                'incorrect': 0
+            }
+
+        # Initialize stats for this language, difficulty, and original model
+        if language not in stats['language']:
+            stats['language'][language] = {
+                'total': 0,
+                'correct': 0,
+                'incorrect': 0
+            }
+        if difficulty not in stats['difficulty']:
+            stats['difficulty'][difficulty] = {
+                'total': 0,
+                'correct': 0,
+                'incorrect': 0
+            }
+        if original_model not in stats['original_model']:
+            stats['original_model'][original_model] = {
+                'total': 0,
+                'correct': 0,
+                'incorrect': 0
+            }
+
+        # Update stats for this example
+        stats['overall']['total'] += 1
+        stats['language'][language]['total'] += 1
+        stats['difficulty'][difficulty]['total'] += 1
+        stats['original_model'][original_model]['total'] += 1
+
+        # Update correct/incorrect counts
+        if eval['match']:
+            stats['overall']['correct'] += 1
+            stats['language'][language]['correct'] += 1
+            stats['difficulty'][difficulty]['correct'] += 1
+            stats['original_model'][original_model]['correct'] += 1
+        else:
+            stats['overall']['incorrect'] += 1
+            stats['language'][language]['incorrect'] += 1
+            stats['difficulty'][difficulty]['incorrect'] += 1
+            stats['original_model'][original_model]['incorrect'] += 1
+
+    # Now average confidence over all evaluations
+    # evaluations[n]['confidence_results'][strategy]['before_confidence'] and ['after_confidence']
+    # and display the average confidence overall
+    confidence = [e['confidence_results'][strategy][time_point + '_confidence']
+                  for e in evaluations
+                  for strategy in strategies for time_point in time_points]
+    print(f"Average confidence: {np.mean(confidence)}")
+
+    # Now do the same but split by language:
+    confidence_by_language = {
+        language: [e['confidence_results'][strategy][time_point + '_confidence']
+                  for e in evaluations
+                  for strategy in strategies for time_point in time_points
+                  if e['example']['language'].lower() == language.lower()]
+        for language in stats['language'].keys()
+    }
+    for language in confidence_by_language.keys():
+        print(f"Average confidence for {language}: {np.mean(confidence_by_language[language])}")
+
+    # Display stats in a table format
+    print("\nOverall Stats:")
+    print(f"{'Total':<8} {'Correct':<8} {'Incorrect':<8} {'Accuracy':<8}")
+    print("-" * 50)
+    total = stats['overall']['total']
+    correct = stats['overall']['correct']
+    incorrect = stats['overall']['incorrect']
+    accuracy = correct / total if total > 0 else 0
+    print(f"{total:<8} {correct:<8} {incorrect:<8} {accuracy:.2%}")
+    print("\nLanguage Stats:")
+    print(f"{'Language':<15} {'Total':<8} {'Correct':<8} {'Incorrect':<8} {'Accuracy':<8}")
+    print("-" * 50)
+    for language in sorted(stats['language'].keys()):
+        total = stats['language'][language]['total']
+        correct = stats['language'][language]['correct']
+        incorrect = stats['language'][language]['incorrect']
+        accuracy = correct / total if total > 0 else 0
+        print(f"{language:<15} {total:<8} {correct:<8} {incorrect:<8} {accuracy:.2%}")
+
+    print("\nDifficulty Stats:")
+    print(f"{'Difficulty':<15} {'Total':<8} {'Correct':<8} {'Incorrect':<8} {'Accuracy':<8}")
+    print("-" * 50)
+    for difficulty in sorted(stats['difficulty'].keys()):
+        total = stats['difficulty'][difficulty]['total']
+        correct = stats['difficulty'][difficulty]['correct']
+        incorrect = stats['difficulty'][difficulty]['incorrect']
+        accuracy = correct / total if total > 0 else 0
+        print(f"{difficulty:<15} {total:<8} {correct:<8} {incorrect:<8} {accuracy:.2%}")
+
+    print("\nOriginal Model Stats:")
+    print(f"{'Original Model':<15} {'Total':<8} {'Correct':<8} {'Incorrect':<8} {'Accuracy':<8}")
+    print("-" * 50)
+    for model in sorted(stats['original_model'].keys()):
+        total = stats['original_model'][model]['total']
+        correct = stats['original_model'][model]['correct']
+        incorrect = stats['original_model'][model]['incorrect']
+        accuracy = correct / total if total > 0 else 0
+        print(f"{model:<15} {total:<8} {correct:<8} {incorrect:<8} {accuracy:.2%}")
 
 if __name__ == "__main__":
     main()
